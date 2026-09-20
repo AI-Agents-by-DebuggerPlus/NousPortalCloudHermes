@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BT_TestV1</string>
+    <string name="app_full_name">Bluetooth Headset Button Tester</string>
+    <string name="bt_monitor_channel">Кнопки гарнитуры</string>
+    <string name="bt_monitor_channel_desc">Мониторинг media-кнопок Bluetooth (BT_TestV1)</string>
+    <string name="bt_monitor_title">BT media (BT_TestV1)</string>
+    <string name="bt_monitor_text">Слушаю кнопки гарнитуры</string>
+</resources>

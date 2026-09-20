@@ -1,4 +1,4 @@
-package com.nous.ahcc.headset
+﻿package com.bttest.v1.headset
 
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -337,7 +337,7 @@ class HeadsetButtonHub(
     }
 
     companion object {
-        private const val TAG = "AHCC-BT"
+        private const val TAG = "BTTestV1"
         private const val BT_PLAY_KEY = "BT_PLAY"
         private const val BT_NEXT_KEY = "BT_NEXT"
         private const val MAX_EVENTS = 40
@@ -357,3 +357,4 @@ class HeadsetButtonHub(
         }
     }
 }
+

@@ -1,7 +1,8 @@
 # AndroidHermesCloudChat — отчёт: тестирование BT-кнопок гарнитуры
 #
-# Версия приложения на момент отчёта: 1.1.2 (4)
-# Образец реализации: AndroidChat (TaskerToWpf) — FGS mediaPlayback + MediaSessionCompat
+# Версия приложения на момент отчёта: 1.1.3 (5)
+# Образец захвата: AndroidChat — FGS mediaPlayback + MediaSessionCompat
+# Образец жестов Play/Next: AndroidEnglishTutor — debounce + double-tap → Next
 
 ## Цель
 
@@ -18,9 +19,11 @@
    - `POST_NOTIFICATIONS` (Android 13+) — чтобы показать уведомление FGS;
    - `BLUETOOTH_CONNECT` (Android 12+) — желательно для BT-стека.
 5. Нажать кнопку на гарнитуре. Счётчик и журнал должны обновиться.
-6. Если реального нажатия нет — поставить на паузу Spotify / YouTube / AndroidChat
-   (другая активная MediaSession перехватывает кнопки). Симуляция на экране
+6. Если реального нажатия нет — поставить на паузу Spotify / YouTube / **BT_TestV1** /
+   AndroidChat (другая активная MediaSession перехватывает кнопки). Симуляция на экране
    всегда работает локально и не зависит от BT.
+
+См. также автономный стенд: [BT_TestV1](../../BT_TestV1/Docs/README.md) / [отчёт BT_TestV1](BT_TestV1.md).
 
 Маршрут навигации: `bluetooth_test` (`AhccNavHost`).
 
@@ -72,20 +75,33 @@ BluetoothTestViewModel  ──start/stop──►  HeadsetMonitorService (FGS)
 `notifyButton(..., source = "ui-simulate")`. Поэтому UI-кнопки работают
 даже при выключенном capture.
 
+## Жесты Play / Next (как в AndroidEnglishTutor)
+
+`HeadsetButtonHub` + `HeadsetButtonPreferences`:
+
+| Жест | Результат |
+|------|-----------|
+| Одиночный Play/Pause/Hook | После окна `nextDoubleTapMs` (по умолчанию 400 ms) → счётчик **Play** |
+| Второй Play-жест в окне | Отмена pending Play → счётчик **Next (2×Play)** |
+| Аппаратный `MEDIA_NEXT` | Счётчик **Next**; companion Play подавляется на `nextDoubleTapMs` |
+| Debounce после commit | Опционально, интервал по умолчанию 500 ms |
+
+Настройки хранятся в SharedPreferences `ahcc_headset_button_prefs`.
+
 ## Состояние на экране
 
 `HeadsetTestState`:
 
 - `captureOn` — сервис запущен;
-- `pressCount` — число принятых событий после дебаунса;
-- `lastLabel` / `lastAt` — последняя кнопка и время `HH:mm:ss.SSS`;
+- `pressCount` / `nextCount` — счётчики Play и Next;
+- `lastLabel` / `lastAt` / `lastKind` — последнее событие;
 - `eventLog` — до 40 строк вида  
-  `12:34:56.789  MEDIA_PLAY  (native)  #3`.
+  `12:34:56.789  [HARDWARE]  Play  (#3)` или `Next (2×Play)`.
 
-Источник в журнале:
+Вид в журнале:
 
-- `native` — реальное нажатие / колбэк MediaSession;
-- `ui-simulate` — кнопка на экране теста.
+- `HARDWARE` — реальное нажатие (`native` / MediaSession);
+- `SIMULATED` — кнопка на экране теста.
 
 ## Разрешения и манифест
 

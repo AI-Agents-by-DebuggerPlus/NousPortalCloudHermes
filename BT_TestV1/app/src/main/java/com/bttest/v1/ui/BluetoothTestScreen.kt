@@ -1,4 +1,4 @@
-package com.nous.ahcc.presentation.bluetooth
+﻿package com.bttest.v1.ui
 
 import android.Manifest
 import android.app.Application
@@ -52,13 +52,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.nous.ahcc.AhccApp
-import com.nous.ahcc.headset.HeadsetButtonNames
-import com.nous.ahcc.headset.HeadsetMonitorService
+import com.bttest.v1.BtTestApp
+import com.bttest.v1.headset.HeadsetButtonNames
+import com.bttest.v1.headset.HeadsetMonitorService
 
 @Composable
 fun BluetoothTestScreen(
-    onBack: () -> Unit
+    versionLabel: String = "",
+    onBack: (() -> Unit)? = null
 ) {
     val app = LocalContext.current.applicationContext as Application
     val context = LocalContext.current
@@ -111,19 +112,30 @@ fun BluetoothTestScreen(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                }
             }
-            Text(
-                text = "Тест BT-кнопок",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onBackground
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "BT_TestV1",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+                if (versionLabel.isNotBlank()) {
+                    Text(
+                        text = versionLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
 
         Text(
-            text = "Одиночный Play → счётчик Play. Двойной Play (или жест Next на Buds) → Next. " +
-                "После Next companion Play подавляется. Поставьте на паузу Spotify/YouTube, если не ловит.",
+            text = "Одиночный Play → Play. Двойной Play / жест Next → Next. " +
+                "Если HARDWARE нет — нажмите Reassert и force-stop AHCC/Spotify/YouTube.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
@@ -251,6 +263,13 @@ fun BluetoothTestScreen(
             Text("Сбросить счётчики")
         }
 
+        OutlinedButton(
+            onClick = vm::reassert,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Reassert MediaSession")
+        }
+
         SimulateButtons(onSimulate = vm::simulate)
 
         HorizontalDivider()
@@ -327,12 +346,21 @@ private fun SimulateButtons(onSimulate: (String) -> Unit) {
 class BluetoothTestViewModel(
     application: Application
 ) : AndroidViewModel(application) {
-    private val hub = (application as AhccApp).headsetHub
+    private val hub = (application as BtTestApp).headsetHub
     val state = hub.state
 
     fun setCaptureEnabled(enabled: Boolean) {
         val ctx = getApplication<Application>()
-        if (enabled) HeadsetMonitorService.start(ctx) else HeadsetMonitorService.stop(ctx)
+        if (enabled) {
+            HeadsetMonitorService.start(ctx)
+            HeadsetMonitorService.reassert(ctx)
+        } else {
+            HeadsetMonitorService.stop(ctx)
+        }
+    }
+
+    fun reassert() {
+        HeadsetMonitorService.reassert(getApplication())
     }
 
     fun setDebounceEnabled(enabled: Boolean) = hub.setDebounceEnabled(enabled)
@@ -361,3 +389,4 @@ class BluetoothTestViewModelFactory(
         throw IllegalArgumentException("Unknown ViewModel ${modelClass.name}")
     }
 }
+
