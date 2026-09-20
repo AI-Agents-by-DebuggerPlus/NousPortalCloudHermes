@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AHCC</string>
+    <string name="app_full_name">Android Hermes Cloud Chat</string>
+    <string name="notification_channel_name">Hermes connection</string>
+    <string name="notification_channel_desc">Keeps the WebSocket to Hermes Agent alive in background</string>
+    <string name="notification_title">Hermes connected</string>
+    <string name="notification_text">AHCC is listening for agent events</string>
+    <string name="bt_monitor_channel">Кнопки гарнитуры</string>
+    <string name="bt_monitor_channel_desc">Мониторинг media-кнопок Bluetooth для AHCC</string>
+    <string name="bt_monitor_title">BT media (AHCC)</string>
+    <string name="bt_monitor_text">Слушаю кнопки гарнитуры</string>
+</resources>

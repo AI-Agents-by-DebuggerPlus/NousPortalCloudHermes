@@ -1,0 +1,98 @@
+Вот готовый, четко структурированный промпт для IDE Cursor, сформированный по лучшим практикам разработки на Kotlin (Jetpack Compose, Clean Architecture, Ktor Client).
+
+Вы можете скопировать текст из блока ниже и вставить его напрямую в **Cursor Chat (Ctrl+L / Cmd+L)** или **Composer (Ctrl+I / Cmd+I)**.
+
+---
+
+### Промпт для Cursor IDE
+
+```text
+Создай архитектуру и ключевые Kotlin-классы для Android-приложения, подключающегося к Hermes Agent по протоколу WebSocket.
+
+### Технологический стек:
+- Язык: Kotlin
+- Сетевой клиент: Ktor Client (Engine: CIO, Plugin: WebSockets, ContentNegotiation, Kotlinx Serialization)
+- Асинхронность: Kotlin Coroutines & StateFlow / SharedFlow
+- Архитектура: Clean Architecture / MVVM
+
+---
+
+### Требования к реализации и структура кода:
+
+1. DTO Модели (`HermesMessage.kt`):
+   - Создай `@Serializable` data-классы для обмена JSON-сообщениями:
+     - `HermesRequest`: отправка текста/команд (поля: `event`, `session_id`, `content`).
+     - `HermesResponse`: обработка ответов от агента (поля: `event`, `delta` для потокового текста, `tool_call`, `session_id`, `error`).
+
+2. Manger/Client WebSocket (`HermesWebSocketManager.kt`):
+   - Реализуй синглтон или менеджер подключения со следующей логикой:
+     - Метод `connect(host: String, port: Int, apiKey: String, sessionId: String)`: открытие WSS/WS соединения с передачей Bearer-токена в заголовках (`Authorization: Bearer <token>`).
+     - Метод `sendMessage(text: String)`: сериализация и отправка текстового кадра (`Frame.Text`).
+     - Автоматический Reconnect: обработка разрыва соединения (Exponential Backoff при сбоях).
+     - Поток входящих данных: трансляция входящих событий через `SharedFlow<HermesResponse>` или `StateFlow<ConnectionState>`.
+     - Метод `disconnect()`: безопасное закрытие `WebSocketSession`.
+
+3. ViewModel (`HermesChatViewModel.kt`):
+   - Управление состоянием подключения (`ConnectionState: Disconnected, Connecting, Connected, Error`).
+   - Управление списком сообщений чата (`UIState` с `List<ChatMessage>`).
+   - Поддержка Streaming: динамическое обновление последнего сообщения агента по мере поступления токенов (`event == "token"` или `delta`).
+
+---
+
+### Пожалуйста, напиши рабочий код с реализацией основных методов:
+
+Предоставь чистый код со всеми необходимыми импортами для следующих блоков:
+
+1. **DTO Классы (Data Transfer Objects):**
+```kotlin
+@Serializable
+data class HermesRequest(...)
+
+@Serializable
+data class HermesResponse(...)
+
+```
+
+2. **Ключевая логика `HermesWebSocketManager.kt`:**
+* Настройка `HttpClient` с `install(WebSockets)`.
+* Полный метод подключения и чтения входящих фреймов:
+
+
+
+```kotlin
+suspend fun connect(...) {
+    client.webSocket(...) {
+        // Цикл чтения incoming фреймов и отправка в Flow
+    }
+}
+
+```
+
+* Метод отправки сообщений:
+
+```kotlin
+suspend fun sendMessage(prompt: String) { ... }
+
+```
+
+3. **Обработка потокового ответа во ViewModel:**
+
+```kotlin
+fun sendPrompt(userPrompt: String) {
+    // Отправка запроса и логика обновления UiState при получении токенов
+}
+
+```
+
+Добавь короткие комментарии к ключевым строкам кода.
+
+```
+
+---
+
+<Elicitations message="Нужно ли добавить дополнительные детали в промпт?">
+  <Elicitation label="Добавить Foreground Service" query="Добавь в промпт для Cursor требования по созданию Android Foreground Service для удержания WebSocket в фоне."/>
+  <Elicitation label="Добавить аудио/Bluetooth" query="Добавь в промпт требования по захвату аудио с Bluetooth-гарнитуры и передачи в WebSocket."/>
+</Elicitations>
+
+```

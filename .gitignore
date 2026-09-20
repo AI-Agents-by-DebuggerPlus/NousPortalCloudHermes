@@ -1,0 +1,42 @@
+# Root .gitignore — NousPortalCloudHermes
+
+# --- Secrets / credentials (do not commit) ---
+Docs/Credentials/
+Docs/Gemini/Credentials.pdf
+Docs/Gemini/credentials_extracted.txt
+Docs/Gemini/pdf_extracted.txt
+**/HermesConfig.kt
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.keystore
+secrets/
+**/local.properties
+
+# --- Android / Gradle ---
+**/build/
+**/.gradle/
+**/.cxx/
+**/.externalNativeBuild/
+**/*.iml
+**/.idea/
+!**/.idea/codeStyles/
+**/captures/
+**/*.apk
+**/*.ap_
+**/*.aab
+**/*.dex
+**/*.class
+**/bin/
+**/gen/
+**/out/
+
+# --- IDE / OS ---
+.vs/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*~

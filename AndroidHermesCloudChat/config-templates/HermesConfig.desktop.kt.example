@@ -1,0 +1,16 @@
+package com.nous.ahcc.desktop.config
+
+/**
+ * Скопируйте в:
+ * desktop/src/main/kotlin/com/nous/ahcc/desktop/config/HermesConfig.kt
+ * и подставьте свой API-ключ. Файл HermesConfig.kt в .gitignore.
+ */
+object HermesConfig {
+    const val HOST = "cloudhermesagent-4280.agents.nousresearch.com"
+    const val PORT = 443
+    const val API_KEY = "sk-nous-REPLACE_ME"
+    const val SESSION_ID = "desktop_test_session"
+    const val USE_TLS = true
+    const val INFERENCE_BASE_URL = "https://inference-api.nousresearch.com"
+    const val MODEL = "z-ai/glm-4.5-air"
+}

@@ -1,0 +1,26 @@
+package com.nous.ahcc.config
+
+/**
+ * Скопируйте в:
+ * app/src/main/java/com/nous/ahcc/config/HermesConfig.kt
+ * и подставьте свой API-ключ. Файл HermesConfig.kt в .gitignore.
+ */
+object HermesConfig {
+    const val HOST = "cloudhermesagent-4280.agents.nousresearch.com"
+    const val PORT = 443
+    const val API_KEY = "sk-nous-REPLACE_ME"
+    const val SESSION_ID = "android_test_session"
+    const val USE_TLS = true
+
+    const val INFERENCE_BASE_URL = "https://inference-api.nousresearch.com"
+    const val MODEL = "z-ai/glm-4.5-air"
+    const val TRANSPORT = "http_sse"
+
+    fun getWebSocketUrl(sessionId: String = SESSION_ID): String {
+        return "wss://$HOST/v1/ws/chat?session_id=$sessionId"
+    }
+
+    fun getRestApiUrl(): String {
+        return "$INFERENCE_BASE_URL/v1/chat/completions"
+    }
+}
