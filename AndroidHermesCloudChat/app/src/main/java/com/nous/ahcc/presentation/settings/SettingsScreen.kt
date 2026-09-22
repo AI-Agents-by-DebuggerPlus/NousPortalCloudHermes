@@ -43,7 +43,8 @@ import com.nous.ahcc.presentation.chat.HermesChatViewModel
 fun SettingsScreen(
     viewModel: HermesChatViewModel,
     onBack: () -> Unit,
-    onOpenBluetoothTest: () -> Unit = {}
+    onOpenBluetoothTest: () -> Unit = {},
+    onOpenVoiceTest: () -> Unit = {}
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var host by remember(state.config.host) { mutableStateOf(state.config.host) }
@@ -209,6 +210,13 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Тест кнопок Bluetooth-гарнитуры")
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
+            onClick = onOpenVoiceTest,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Тест голоса (Start / Play / Send)")
         }
         Spacer(Modifier.height(12.dp))
         Button(

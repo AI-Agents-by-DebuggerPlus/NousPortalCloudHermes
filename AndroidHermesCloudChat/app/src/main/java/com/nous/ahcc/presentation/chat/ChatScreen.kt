@@ -164,6 +164,12 @@ fun ChatScreen(
         viewModel.clearError()
     }
 
+    LaunchedEffect(state.statusNotice) {
+        val notice = state.statusNotice ?: return@LaunchedEffect
+        snackbar.showSnackbar(notice)
+        viewModel.clearStatusNotice()
+    }
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
@@ -213,8 +219,17 @@ fun ChatScreen(
         ) {
             if (state.isRecording) {
                 Text(
-                    text = "Recording... Play / Mic to stop and send",
+                    text = "Recording… stop talking → auto-send. Play ignored until reply.",
                     color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.labelLarge,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+            } else if (state.isSending) {
+                Text(
+                    text = "Waiting for transcription… Play ignored.",
+                    color = MaterialTheme.colorScheme.primary,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
                         .fillMaxWidth()

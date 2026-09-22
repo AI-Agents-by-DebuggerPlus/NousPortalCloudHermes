@@ -35,6 +35,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,6 +69,14 @@ fun BluetoothTestScreen(
     )
     val state by vm.state.collectAsStateWithLifecycle()
 
+    DisposableEffect(Unit) {
+        val hub = (app as AhccApp).headsetHub
+        hub.voiceGesturesEnabled = false
+        HeadsetMonitorService.reassert(context)
+        onDispose {
+            hub.voiceGesturesEnabled = true
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) {

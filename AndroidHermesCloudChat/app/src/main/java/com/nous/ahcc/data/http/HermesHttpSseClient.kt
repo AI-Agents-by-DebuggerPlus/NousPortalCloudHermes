@@ -146,7 +146,8 @@ class HermesHttpSseClient {
             error("HTTP transport is not connected")
         }
         sendMutex.withLock {
-            streamJob?.cancel()
+            // Do not cancel an in-flight completion — wait, then send next.
+            streamJob?.join()
             streamJob = scope.launch {
                 streamCompletion(config, historyText, requestContent, sessionId)
             }
@@ -236,7 +237,12 @@ class HermesHttpSseClient {
 
             Log.i(
                 TAG,
-                "-> POST $base/v1/chat/completions model=${config.model} multimodal=$useMultimodal"
+                "-> POST $base/v1/chat/completions model=${config.model} multimodal=$useMultimodal " +
+                    "historyChars=${historyText.length} requestChars=" +
+                    when (requestContent) {
+                        is TextRequestContent.Plain -> requestContent.text.length
+                        is TextRequestContent.Multimodal -> requestContent.text.length
+                    }
             )
             val http = client ?: error("HttpClient missing")
             http.preparePost("$base/v1/chat/completions") {

@@ -8,43 +8,57 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import com.nous.ahcc.AhccApp
 import com.nous.ahcc.MainActivity
 import com.nous.ahcc.R
+import java.util.concurrent.Executors
 
 /**
- * Foreground service + MediaSession для приёма media-кнопок Bluetooth-гарнитуры.
- * Схема как в AndroidChat: активная MediaSession + STATE_PAUSED + FGS mediaPlayback.
+ * Foreground service + MediaSession for Bluetooth headset media buttons.
+ * AudioFocus + PLAYING→PAUSED claim + USAGE_MEDIA pulse (same approach as BT_TestV1).
  */
 class HeadsetMonitorService : Service() {
     private var mediaSession: MediaSessionCompat? = null
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val pulseExecutor = Executors.newSingleThreadExecutor()
 
     override fun onCreate() {
         super.onCreate()
         ensureChannel()
         startAsForeground()
-        attachMediaSession()
+        attachMediaSession(forceReattach = true)
         (application as AhccApp).headsetHub.setCaptureOn(true)
         Log.i(TAG, "created, session active=${mediaSession?.isActive}")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (mediaSession?.isActive != true) {
-            attachMediaSession()
+        val force = intent?.getBooleanExtra(EXTRA_FORCE_REASSERT, false) == true
+        if (force) {
+            attachMediaSession(forceReattach = true)
+        } else if (mediaSession?.isActive != true) {
+            attachMediaSession(forceReattach = mediaSession != null)
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         (application as AhccApp).headsetHub.setCaptureOn(false)
+        abandonAudioFocus()
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null
@@ -54,10 +68,28 @@ class HeadsetMonitorService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun attachMediaSession() {
-        if (mediaSession != null) return
+    private fun attachMediaSession(forceReattach: Boolean = false) {
+        if (mediaSession != null && !forceReattach) {
+            mediaSession?.isActive = true
+            return
+        }
+        if (forceReattach) {
+            mediaSession?.isActive = false
+            mediaSession?.release()
+            mediaSession = null
+        }
+
+        requestAudioFocus()
 
         val hub = (application as AhccApp).headsetHub
+        val actions =
+            PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackStateCompat.ACTION_STOP
+
         val session = MediaSessionCompat(this, "AhccHeadset").apply {
             setFlags(
                 MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
@@ -67,27 +99,27 @@ class HeadsetMonitorService : Service() {
                 object : MediaSessionCompat.Callback() {
                     override fun onPlay() {
                         Log.i(TAG, "onPlay")
-                        hub.notifyButton("MEDIA_PLAY")
+                        hub.notifyButton("MEDIA_PLAY", source = "hardware-callback-onPlay")
                     }
 
                     override fun onPause() {
                         Log.i(TAG, "onPause")
-                        hub.notifyButton("MEDIA_PAUSE")
+                        hub.notifyButton("MEDIA_PAUSE", source = "hardware-callback-onPause")
                     }
 
                     override fun onSkipToNext() {
                         Log.i(TAG, "onSkipToNext")
-                        hub.notifyButton("MEDIA_NEXT")
+                        hub.notifyButton("MEDIA_NEXT", source = "hardware-callback-onNext")
                     }
 
                     override fun onSkipToPrevious() {
                         Log.i(TAG, "onSkipToPrevious")
-                        hub.notifyButton("MEDIA_PREVIOUS")
+                        hub.notifyButton("MEDIA_PREVIOUS", source = "hardware-callback-onPrev")
                     }
 
                     override fun onStop() {
                         Log.i(TAG, "onStop")
-                        hub.notifyButton("MEDIA_STOP")
+                        hub.notifyButton("MEDIA_STOP", source = "hardware-callback-onStop")
                     }
 
                     override fun onMediaButtonEvent(mediaButtonIntent: Intent?): Boolean {
@@ -102,7 +134,7 @@ class HeadsetMonitorService : Service() {
                             event.action == KeyEvent.ACTION_DOWN &&
                             event.repeatCount == 0
                         ) {
-                            hub.notifyButton(label)
+                            hub.notifyButton(label, source = "hardware-mediaButtonEvent")
                             return true
                         }
                         return super.onMediaButtonEvent(mediaButtonIntent)
@@ -111,20 +143,89 @@ class HeadsetMonitorService : Service() {
             )
             setPlaybackState(
                 PlaybackStateCompat.Builder()
-                    .setActions(
-                        PlaybackStateCompat.ACTION_PLAY or
-                            PlaybackStateCompat.ACTION_PAUSE or
-                            PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                            PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                            PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
-                            PlaybackStateCompat.ACTION_STOP
-                    )
-                    .setState(PlaybackStateCompat.STATE_PAUSED, 0, 0f)
+                    .setActions(actions)
+                    .setState(PlaybackStateCompat.STATE_PLAYING, 0, 1f)
                     .build()
             )
             isActive = true
+            setPlaybackState(
+                PlaybackStateCompat.Builder()
+                    .setActions(actions)
+                    .setState(PlaybackStateCompat.STATE_PAUSED, 0, 0f)
+                    .build()
+            )
         }
         mediaSession = session
+        Log.i(TAG, "MediaSession attached force=$forceReattach")
+
+        if (forceReattach) {
+            pulseExecutor.execute {
+                MediaPlaybackPulse.pulse(this)
+                mainHandler.post { refreshClaimPlaybackState() }
+            }
+        }
+    }
+
+    private fun refreshClaimPlaybackState() {
+        val session = mediaSession ?: return
+        val actions =
+            PlaybackStateCompat.ACTION_PLAY or
+                PlaybackStateCompat.ACTION_PAUSE or
+                PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
+                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS or
+                PlaybackStateCompat.ACTION_STOP
+        session.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(actions)
+                .setState(PlaybackStateCompat.STATE_PLAYING, 0, 1f)
+                .build()
+        )
+        session.isActive = true
+        session.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(actions)
+                .setState(PlaybackStateCompat.STATE_PAUSED, 0, 0f)
+                .build()
+        )
+        Log.i(TAG, "MediaSession claim refreshed after pulse")
+    }
+
+    private fun requestAudioFocus() {
+        val am = getSystemService(AudioManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener { }
+                .build()
+            audioFocusRequest = req
+            val result = am.requestAudioFocus(req)
+            Log.i(TAG, "AudioFocus result=$result")
+        } else {
+            @Suppress("DEPRECATION")
+            val result = am.requestAudioFocus(
+                { },
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            )
+            Log.i(TAG, "AudioFocus(legacy) result=$result")
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        val am = getSystemService(AudioManager::class.java) ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            am.abandonAudioFocus(null)
+        }
+        audioFocusRequest = null
     }
 
     private fun extractKeyEvent(intent: Intent?): KeyEvent? {
@@ -182,10 +283,17 @@ class HeadsetMonitorService : Service() {
         private const val TAG = "AHCC-BT-SVC"
         private const val CHANNEL_ID = "ahcc_headset"
         private const val NOTIFICATION_ID = 2202
+        private const val EXTRA_FORCE_REASSERT = "force_reassert"
 
         fun start(context: Context) {
             val intent = Intent(context, HeadsetMonitorService::class.java)
-            androidx.core.content.ContextCompat.startForegroundService(context, intent)
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        fun reassert(context: Context) {
+            val intent = Intent(context, HeadsetMonitorService::class.java)
+                .putExtra(EXTRA_FORCE_REASSERT, true)
+            ContextCompat.startForegroundService(context, intent)
         }
 
         fun stop(context: Context) {

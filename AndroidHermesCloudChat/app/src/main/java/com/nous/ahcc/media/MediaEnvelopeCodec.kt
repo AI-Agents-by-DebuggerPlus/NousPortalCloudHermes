@@ -126,7 +126,9 @@ object MediaEnvelopeCodec {
     private fun defaultCaption(attachments: List<ChatAttachment>): String {
         val kinds = attachments.map { it.kind }.toSet()
         return when {
-            kinds == setOf(MediaKind.Voice) -> "Голосовое сообщение"
+            kinds == setOf(MediaKind.Voice) ->
+                "Voice note (audio/mp4). Return ONLY a short transcription of what was said. " +
+                    "No commentary, no greeting, no extra text."
             kinds == setOf(MediaKind.Photo) -> "Фото"
             kinds.singleOrNull() == MediaKind.File -> "Файл: ${attachments.first().name}"
             else -> "Вложения (${attachments.size})"

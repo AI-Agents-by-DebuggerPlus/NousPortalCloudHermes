@@ -13,10 +13,10 @@ android {
         applicationId = "com.nous.ahcc"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "1.2.0"
+        versionCode = 12
+        versionName = "1.2.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "VERSION_LABEL", "\"1.2.0 (6)\"")
+        buildConfigField("String", "VERSION_LABEL", "\"1.2.6 (12)\"")
     }
 
     buildTypes {

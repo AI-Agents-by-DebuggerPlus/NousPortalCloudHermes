@@ -67,9 +67,11 @@ create policy "ahcc_files_insert_anon"
 | New session | `ahcc_messages.content = 'new session'` |
 | Chat text | `ahcc_messages` + `session_id` |
 | Shared `.md` / text | row in `ahcc_files` + chat marker `[AHCC_FILE]{"id","name","mime"}` in `ahcc_messages` |
+| Voice → Hermes Cloud | **not stored as audio in Supabase** — AAC/M4A goes in `AHCC_MEDIA_V1` over Nous Inference HTTP. Supabase only gets a short text placeholder (`[voice] …`) for history/AHCCDV. |
 
 **Last session** = last `ahcc_messages` row by `created_at` → `session_id`.
 
+> **Voice / binary:** current `ahcc_files.content` is `text` only. No schema change is required for Hermes voice today. Later, shared audio between AHCC/AHCCD/AHCCDV would need Supabase Storage (or `bytea` / base64 column) — optional follow-up.
 ## Clients
 
 - **AHCC / AHCCD**: create/resume session; write messages; attach `.md` → Supabase file + marker.

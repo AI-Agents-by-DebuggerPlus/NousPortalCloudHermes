@@ -78,6 +78,30 @@ class HeadsetButtonHub(
     private val _events = MutableSharedFlow<HeadsetButtonEvent>(extraBufferCapacity = 32)
     val events: SharedFlow<HeadsetButtonEvent> = _events.asSharedFlow()
 
+    /** When false (BT test screen), chat must not start voice on Play. */
+    @Volatile
+    var voiceGesturesEnabled: Boolean = true
+
+    private val voiceGestureLock = Any()
+    private var lastVoiceGestureConsumedAtMs = 0L
+
+    /**
+     * Process-wide gate so a single committed Play is handled once even if
+     * multiple collectors listen to [events].
+     */
+    fun tryConsumeVoiceGesture(minIntervalMs: Long = 700L): Boolean {
+        if (!voiceGesturesEnabled) return false
+        val now = System.currentTimeMillis()
+        synchronized(voiceGestureLock) {
+            if (now - lastVoiceGestureConsumedAtMs < minIntervalMs) {
+                Log.d(TAG, "voice gesture consumed already (${now - lastVoiceGestureConsumedAtMs}ms ago)")
+                return false
+            }
+            lastVoiceGestureConsumedAtMs = now
+            return true
+        }
+    }
+
     init {
         scope.launch {
             buttonPreferences.state.collect { prefs ->
@@ -198,12 +222,18 @@ class HeadsetButtonHub(
                 lastGestureAtMs > 0L &&
                 now - lastGestureAtMs <= doubleTapMs
             ) {
-                cancelPendingPlayLocked()
-                lastGestureAtMs = 0L
-                lastCommittedKey = BT_NEXT_KEY
-                lastCommittedAtMs = now
-                suppressPlayUntilMs = now + doubleTapMs
-                PlayAction.CommitNext
+                // Same physical press often emits PLAY + PAUSE (or mediaButton + onPlay)
+                // within a few dozen ms — do not treat as double-tap → Next.
+                if (now - lastGestureAtMs < COALESCE_MS) {
+                    PlayAction.CompanionIgnored
+                } else {
+                    cancelPendingPlayLocked()
+                    lastGestureAtMs = 0L
+                    lastCommittedKey = BT_NEXT_KEY
+                    lastCommittedAtMs = now
+                    suppressPlayUntilMs = now + doubleTapMs
+                    PlayAction.CommitNext
+                }
             } else if (
                 prefs.debounceEnabled &&
                 (lastCommittedKey == BT_PLAY_KEY || lastCommittedKey == BT_NEXT_KEY) &&
@@ -243,6 +273,8 @@ class HeadsetButtonHub(
             PlayAction.Debounce -> Log.d(TAG, "Debounced: $label ($source)")
             PlayAction.SuppressedAfterNext ->
                 Log.d(TAG, "Suppressed Play after Next: $label ($source)")
+            PlayAction.CompanionIgnored ->
+                Log.d(TAG, "Companion Play ignored (<${COALESCE_MS}ms): $label ($source)")
             PlayAction.CommitNext -> {
                 Log.i(
                     TAG,
@@ -332,6 +364,7 @@ class HeadsetButtonHub(
     private sealed class PlayAction {
         data object Debounce : PlayAction()
         data object SuppressedAfterNext : PlayAction()
+        data object CompanionIgnored : PlayAction()
         data object CommitNext : PlayAction()
         data class WaitForDouble(val windowMs: Long) : PlayAction()
     }
@@ -341,6 +374,8 @@ class HeadsetButtonHub(
         private const val BT_PLAY_KEY = "BT_PLAY"
         private const val BT_NEXT_KEY = "BT_NEXT"
         private const val MAX_EVENTS = 40
+        /** Collapse PLAY+PAUSE / dual callbacks from one physical press. */
+        private const val COALESCE_MS = 280L
 
         fun eventKind(source: String): String {
             val s = source.lowercase()

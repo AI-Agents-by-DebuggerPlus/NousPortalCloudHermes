@@ -12,6 +12,7 @@ object Routes {
     const val Chat = "chat"
     const val Settings = "settings"
     const val BluetoothTest = "bluetooth_test"
+    const val VoiceTest = "voice_test"
 }
 
 @Composable
@@ -29,11 +30,17 @@ fun AhccNavHost(viewModel: HermesChatViewModel) {
             SettingsScreen(
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
-                onOpenBluetoothTest = { navController.navigate(Routes.BluetoothTest) }
+                onOpenBluetoothTest = { navController.navigate(Routes.BluetoothTest) },
+                onOpenVoiceTest = { navController.navigate(Routes.VoiceTest) }
             )
         }
         composable(Routes.BluetoothTest) {
             com.nous.ahcc.presentation.bluetooth.BluetoothTestScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.VoiceTest) {
+            com.nous.ahcc.presentation.voice.VoiceTestScreen(
                 onBack = { navController.popBackStack() }
             )
         }

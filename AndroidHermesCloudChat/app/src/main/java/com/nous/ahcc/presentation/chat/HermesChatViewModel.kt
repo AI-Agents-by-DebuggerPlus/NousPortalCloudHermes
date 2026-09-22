@@ -17,7 +17,6 @@ import com.nous.ahcc.domain.model.ConnectionState
 import com.nous.ahcc.domain.model.MediaKind
 import com.nous.ahcc.domain.model.MessageRole
 import com.nous.ahcc.domain.model.TransportMode
-import com.nous.ahcc.headset.HeadsetButtonNames
 import com.nous.ahcc.headset.HeadsetMonitorService
 import com.nous.ahcc.media.MediaEnvelopeCodec
 import com.nous.ahcc.media.MediaLimits
@@ -26,15 +25,21 @@ import com.nous.ahcc.media.VoicePlayer
 import com.nous.ahcc.media.VoiceRecorder
 import com.nous.ahcc.data.supabase.AhccSupabaseClient
 import com.nous.ahcc.service.HermesConnectionService
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class ChatUiState(
     val messages: List<ChatMessage> = emptyList(),
@@ -42,6 +47,8 @@ data class ChatUiState(
     val config: ConnectionConfig = ConnectionConfig(),
     val draft: String = "",
     val lastError: String? = null,
+    /** One-shot UI notice (snackbar), e.g. “Аудиофайл отправлен”. */
+    val statusNotice: String? = null,
     val isSending: Boolean = false,
     val isRecording: Boolean = false,
     val playingPath: String? = null,
@@ -57,6 +64,8 @@ class HermesChatViewModel(
     private val app = application as AhccApp
     private val voiceRecorder = VoiceRecorder(application)
     private val voicePlayer = VoicePlayer()
+    private val sendInFlight = AtomicBoolean(false)
+    private var silenceWatchJob: Job? = null
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -102,21 +111,14 @@ class HermesChatViewModel(
     }
 
     private fun onHeadsetEvent(label: String) {
-        if (!HeadsetButtonNames.isBtPlayGestureLabel(label)) return
-        // Only committed Play reaches hub as Play counter; Next is separate.
-        // Hub already maps double-tap to Next events — we only get Play after single-tap window
-        // via notifyButton for play gestures that commit... Actually play gestures go through
-        // pending window; only recordPlayEvent emits. But events SharedFlow emits only from
-        // recordPlay/Next/Other. So MEDIA_PLAY-like labels won't appear on events for pending.
-        // recordPlayEvent emits display "Play". recordNextEvent emits "Next" / "Next (2×Play)".
-        if (label.startsWith("Next", ignoreCase = true)) return
-        if (label.contains("Play", ignoreCase = true) ||
-            label.equals("HeadsetHook", ignoreCase = true) ||
-            label.equals("Pause", ignoreCase = true) ||
-            label.equals("Play/Pause", ignoreCase = true)
+        if (_uiState.value.connectionState != ConnectionState.Connected) return
+        if (!label.equals("Play", ignoreCase = true) &&
+            !label.equals("HeadsetHook", ignoreCase = true)
         ) {
-            toggleVoiceRecording()
+            return
         }
+        if (!app.headsetHub.tryConsumeVoiceGesture()) return
+        onVoicePlayPressed()
     }
 
     fun onDraftChange(value: String) {
@@ -211,6 +213,8 @@ class HermesChatViewModel(
     fun disconnect() {
         HermesConnectionService.stop(getApplication())
         chatGateway.disconnect()
+        silenceWatchJob?.cancel()
+        silenceWatchJob = null
         voiceRecorder.cancel()
         voicePlayer.stop()
         _uiState.update { it.copy(isRecording = false, playingPath = null) }
@@ -242,29 +246,116 @@ class HermesChatViewModel(
         }
     }
 
-    fun toggleVoiceRecording() {
+    /** BT Play: start recording; silence auto-sends. Ignore while waiting for reply. */
+    fun onVoicePlayPressed() {
         if (_uiState.value.connectionState != ConnectionState.Connected) {
             _uiState.update { it.copy(lastError = "Подключитесь, чтобы отправить голос") }
             return
         }
-        if (voiceRecorder.isRecording) {
-            stopVoiceAndSend()
+        if (sendInFlight.get() || _uiState.value.isSending) {
+            Log.i(TAG, "Play ignored — waiting for Hermes reply")
+            _uiState.update { it.copy(statusNotice = "Ждём ответ агента…") }
+            return
+        }
+        if (voiceRecorder.isRecording || _uiState.value.isRecording) {
+            Log.d(TAG, "Play ignored — already recording (silence will auto-send)")
+            return
+        }
+        startVoiceRecordingWithSilenceStop()
+    }
+
+    /** Mic: start like Play; while recording, force-stop + send. */
+    fun toggleVoiceRecording() {
+        if (voiceRecorder.isRecording || _uiState.value.isRecording) {
+            stopVoiceAndSend(notice = "Аудиофайл отправлен")
         } else {
-            runCatching {
-                voiceRecorder.start()
-                _uiState.update { it.copy(isRecording = true) }
-            }.onFailure { e ->
-                _uiState.update { it.copy(lastError = e.message ?: "Не удалось начать запись") }
+            onVoicePlayPressed()
+        }
+    }
+
+    private fun startVoiceRecordingWithSilenceStop() {
+        silenceWatchJob?.cancel()
+        runCatching {
+            voiceRecorder.start()
+            _uiState.update {
+                it.copy(isRecording = true, lastError = null, statusNotice = "Запись… тишина отправит")
+            }
+            Log.i(TAG, "voice recording UI started")
+            silenceWatchJob = viewModelScope.launch {
+                watchSilenceAndAutoSend()
+            }
+        }.onFailure { e ->
+            Log.e(TAG, "voice start failed: ${e.message}", e)
+            _uiState.update { it.copy(lastError = e.message ?: "Не удалось начать запись") }
+        }
+    }
+
+    private suspend fun watchSilenceAndAutoSend() {
+        var heardSpeech = false
+        var silenceSinceMs = 0L
+        val startedAt = System.currentTimeMillis()
+        while (currentCoroutineContext().isActive && voiceRecorder.isRecording) {
+            delay(100)
+            val amp = voiceRecorder.currentAmplitude()
+            val now = System.currentTimeMillis()
+            val elapsed = now - startedAt
+            if (elapsed >= VoiceRecorder.MAX_RECORDING_MS) {
+                Log.i(TAG, "voice max duration → auto-send")
+                stopVoiceAndSend(notice = "Аудиофайл отправлен")
+                return
+            }
+            when {
+                amp >= VoiceRecorder.SPEECH_AMPLITUDE -> {
+                    if (!heardSpeech) Log.d(TAG, "voice: speech detected amp=$amp")
+                    heardSpeech = true
+                    silenceSinceMs = 0L
+                }
+                heardSpeech && amp <= VoiceRecorder.SILENCE_AMPLITUDE -> {
+                    if (silenceSinceMs == 0L) silenceSinceMs = now
+                    val quietFor = now - silenceSinceMs
+                    if (quietFor >= VoiceRecorder.SILENCE_END_MS) {
+                        Log.i(TAG, "voice silence ${quietFor}ms → auto-send")
+                        stopVoiceAndSend(notice = "Аудиофайл отправлен")
+                        return
+                    }
+                }
+                !heardSpeech && elapsed >= VoiceRecorder.NO_SPEECH_TIMEOUT_MS -> {
+                    Log.w(TAG, "voice: no speech, cancel")
+                    silenceWatchJob = null
+                    voiceRecorder.cancel()
+                    _uiState.update {
+                        it.copy(isRecording = false, lastError = "Речь не обнаружена")
+                    }
+                    return
+                }
             }
         }
     }
 
-    private fun stopVoiceAndSend() {
+    private fun stopVoiceAndSend(notice: String = "Аудиофайл отправлен") {
+        silenceWatchJob?.cancel()
+        silenceWatchJob = null
+        if (sendInFlight.get()) {
+            Log.w(TAG, "voice stop ignored, send already in flight")
+            voiceRecorder.cancel()
+            _uiState.update { it.copy(isRecording = false) }
+            return
+        }
         val result = voiceRecorder.stop()
         _uiState.update { it.copy(isRecording = false) }
         if (result == null) {
+            Log.w(TAG, "voice discarded (too short or failed)")
             _uiState.update { it.copy(lastError = "Запись слишком короткая") }
             return
+        }
+        Log.i(
+            TAG,
+            "voice ready ${result.file.name} ${result.bytes.size}B ${result.durationMs}ms → Hermes"
+        )
+        val caption = _uiState.value.draft.trim().ifBlank {
+            "Voice note (audio/mp4, ${result.durationMs} ms).\n" +
+                "Transcribe the speech. Reply with ONLY the transcription text — " +
+                "no preamble, no summary, no questions."
         }
         val attachment = ChatAttachment(
             id = result.id,
@@ -275,8 +366,12 @@ class HermesChatViewModel(
             durationMs = result.durationMs,
             localPath = result.file.absolutePath
         )
-        sendAttachments(listOf(attachment), caption = _uiState.value.draft.trim().ifBlank { null })
-        _uiState.update { it.copy(draft = "") }
+        sendAttachments(listOf(attachment), caption = caption)
+        _uiState.update { it.copy(draft = "", statusNotice = notice) }
+    }
+
+    fun clearStatusNotice() {
+        _uiState.update { it.copy(statusNotice = null) }
     }
 
     fun onCameraPhotoCaptured(file: File) {
@@ -402,6 +497,11 @@ class HermesChatViewModel(
         val photoB64 = attachments.firstOrNull { it.kind == MediaKind.Photo }
             ?.let { Base64.encodeToString(it.bytes, Base64.NO_WRAP) }
         val first = attachments.first()
+        Log.i(
+            TAG,
+            "sendAttachments kind=${first.kind} name=${first.name} raw=${first.bytes.size}B " +
+                "envelopeChars=${envelope.length} → Inference + Supabase placeholder"
+        )
         beginSend(
             userMessage = ChatMessage(
                 id = UUID.randomUUID().toString(),
@@ -432,6 +532,10 @@ class HermesChatViewModel(
     }
 
     private fun beginSend(userMessage: ChatMessage, block: suspend () -> Unit) {
+        if (!sendInFlight.compareAndSet(false, true)) {
+            Log.w(TAG, "beginSend skipped — request already in flight")
+            return
+        }
         val assistantId = UUID.randomUUID().toString()
         val assistantPlaceholder = ChatMessage(
             id = assistantId,
@@ -464,6 +568,8 @@ class HermesChatViewModel(
                         }
                     )
                 }
+            } finally {
+                sendInFlight.set(false)
             }
         }
     }
@@ -664,9 +770,14 @@ class HermesChatViewModel(
     }
 
     override fun onCleared() {
+        silenceWatchJob?.cancel()
         voiceRecorder.cancel()
         voicePlayer.stop()
         super.onCleared()
+    }
+
+    companion object {
+        private const val TAG = "AHCC-ChatVM"
     }
 }
 
