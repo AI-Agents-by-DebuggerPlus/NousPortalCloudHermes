@@ -55,6 +55,28 @@ class HermesChatGateway(
         }
     }
 
+    suspend fun sendMedia(
+        envelopeText: String,
+        historyPlaceholder: String,
+        photoJpegBase64: String?,
+        attachmentWires: List<com.nous.ahcc.domain.model.MediaAttachmentWire>?,
+        sessionId: String? = null
+    ) {
+        when (activeMode) {
+            TransportMode.HttpSse -> httpSse.sendMedia(
+                envelopeText = envelopeText,
+                historyPlaceholder = historyPlaceholder,
+                photoJpegBase64 = photoJpegBase64,
+                sessionId = sessionId
+            )
+            TransportMode.WebSocket -> webSocket.sendMediaMessage(
+                text = envelopeText,
+                attachments = attachmentWires,
+                sessionId = sessionId
+            )
+        }
+    }
+
     fun disconnect(clearHttpHistory: Boolean = true) {
         collectJobs.forEach { it.cancel() }
         collectJobs.clear()

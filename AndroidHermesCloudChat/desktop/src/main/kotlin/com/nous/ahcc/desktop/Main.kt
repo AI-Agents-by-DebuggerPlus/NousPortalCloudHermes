@@ -10,15 +10,19 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -51,27 +55,57 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.nous.ahcc.desktop.config.DesktopUiSettings
 import com.nous.ahcc.desktop.config.HermesConfig
+import com.nous.ahcc.desktop.media.DesktopMediaEnvelope
 import com.nous.ahcc.desktop.model.ChatMessage
 import com.nous.ahcc.desktop.model.ConnectionConfig
 import com.nous.ahcc.desktop.model.ConnectionState
 import com.nous.ahcc.desktop.model.MessageRole
+import com.nous.ahcc.desktop.net.AhccSupabaseClient
 import com.nous.ahcc.desktop.net.HermesHttpSseClient
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.awt.FileDialog
+import java.awt.Frame
+import java.io.File
 import java.util.UUID
 
-fun main() = application {
+fun main() {
+    // DirectX12 often fails on older/Intel GPUs; prefer OpenGL unless overridden.
+    if (System.getProperty("skiko.renderApi").isNullOrBlank()) {
+        System.setProperty("skiko.renderApi", "OPENGL")
+    }
+    Thread.setDefaultUncaughtExceptionHandler { _, error ->
+        error.printStackTrace()
+        try {
+            javax.swing.SwingUtilities.invokeLater {
+                javax.swing.JOptionPane.showMessageDialog(
+                    null,
+                    error.message ?: error.toString(),
+                    "AHCC Desktop crashed",
+                    javax.swing.JOptionPane.ERROR_MESSAGE
+                )
+            }
+        } catch (_: Exception) {
+            // ignore UI failures during crash reporting
+        }
+    }
+
+    application {
     val client = remember { HermesHttpSseClient() }
     Window(
         onCloseRequest = {
             client.disconnect()
             exitApplication()
         },
-        title = "AHCC Desktop — Hermes Cloud Chat",
+        title = "AHCC Desktop v${AppVersion.LABEL}",
         state = rememberWindowState(size = DpSize(920.dp, 720.dp))
     ) {
         val colors = darkColorScheme(
             primary = Color(0xFF1FA6A0),
+            onPrimary = Color(0xFFE8F4F3),
             background = Color(0xFF0B1F2A),
             surface = Color(0xFF123D45),
             onBackground = Color(0xFFE8F4F3),
@@ -88,6 +122,7 @@ fun main() = application {
             }
         )
     }
+    }
 }
 
 @Composable
@@ -102,18 +137,132 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
                 apiKey = HermesConfig.API_KEY,
                 model = HermesConfig.MODEL,
                 inferenceBaseUrl = HermesConfig.INFERENCE_BASE_URL,
-                sessionId = HermesConfig.SESSION_ID
+                sessionId = DesktopUiSettings.sessionId.ifBlank { HermesConfig.SESSION_ID },
+                host = HermesConfig.HOST,
+                port = HermesConfig.PORT,
+                useTls = HermesConfig.USE_TLS,
+                agentApiBaseUrl = HermesConfig.AGENT_API_BASE_URL,
+                supabaseUrl = DesktopUiSettings.supabaseUrl,
+                supabaseAnonKey = DesktopUiSettings.supabaseAnonKey,
             )
         )
     }
     var draft by remember { mutableStateOf("") }
     var messages by remember { mutableStateOf(listOf<ChatMessage>()) }
     var showSettings by remember { mutableStateOf(false) }
+    var startOnLaunch by remember { mutableStateOf(DesktopUiSettings.startOnLaunch) }
     val listState = rememberLazyListState()
+
+    fun persistConfig(c: ConnectionConfig) {
+        DesktopUiSettings.persistConnection(
+            sessionId = c.sessionId,
+            supabaseUrl = c.supabaseUrl,
+            supabaseAnonKey = c.supabaseAnonKey,
+            startOnLaunch = startOnLaunch,
+        )
+    }
+
+    fun supabase() = AhccSupabaseClient(config.supabaseUrl, config.supabaseAnonKey)
+
+    fun historyFromSupabase(rows: List<com.nous.ahcc.desktop.net.AhccMessageRow>): List<ChatMessage> =
+        rows.mapNotNull { row ->
+            when {
+                row.content.equals(AhccSupabaseClient.NEW_SESSION_CONTENT, ignoreCase = true) ->
+                    ChatMessage(
+                        id = row.id ?: UUID.randomUUID().toString(),
+                        role = MessageRole.System,
+                        content = "Session ${row.sessionId}"
+                    )
+                AhccSupabaseClient.parseFileMarker(row.content) != null -> {
+                    val ref = AhccSupabaseClient.parseFileMarker(row.content)!!
+                    ChatMessage(
+                        id = row.id ?: UUID.randomUUID().toString(),
+                        role = if (row.senderName.equals(AhccSupabaseClient.SENDER_HERMES, ignoreCase = true))
+                            MessageRole.Assistant else MessageRole.User,
+                        content = "[file] ${ref.second}"
+                    )
+                }
+                row.senderName.equals(AhccSupabaseClient.SENDER_HERMES, ignoreCase = true) ->
+                    ChatMessage(
+                        id = row.id ?: UUID.randomUUID().toString(),
+                        role = MessageRole.Assistant,
+                        content = row.content
+                    )
+                else ->
+                    ChatMessage(
+                        id = row.id ?: UUID.randomUUID().toString(),
+                        role = MessageRole.User,
+                        content = row.content
+                    )
+            }
+        }
+
+    fun connectWithSession(forceNew: Boolean) {
+        scope.launch {
+            messages = emptyList()
+            try {
+                val sb = supabase()
+                val resolved = withContext(Dispatchers.IO) {
+                    sb.resolveOrCreateSession(
+                        forceNew = forceNew,
+                        preferredId = config.sessionId,
+                        senderName = AhccSupabaseClient.SENDER_DESKTOP,
+                    )
+                }
+                val next = config.copy(sessionId = resolved)
+                config = next
+                persistConfig(next)
+                if (sb.isConfigured) {
+                    val rows = withContext(Dispatchers.IO) { sb.fetchSessionMessages(resolved) }
+                    messages = historyFromSupabase(rows)
+                }
+                client.connect(next)
+            } catch (e: Exception) {
+                messages = listOf(
+                    ChatMessage(
+                        UUID.randomUUID().toString(),
+                        MessageRole.System,
+                        e.message ?: "Connect / Supabase failed"
+                    )
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (startOnLaunch && connection == ConnectionState.Disconnected) {
+            connectWithSession(forceNew = false)
+        }
+    }
 
     LaunchedEffect(Unit) {
         client.responses.collect { response ->
             when (response.event) {
+                "history" -> {
+                    // Prefer Supabase history already loaded; only fill if empty.
+                    if (messages.isNotEmpty()) return@collect
+                    val items = response.history.orEmpty()
+                    messages = items.mapNotNull { item ->
+                        val role = when (item.role.lowercase()) {
+                            "user" -> MessageRole.User
+                            "assistant" -> MessageRole.Assistant
+                            "system" -> MessageRole.System
+                            else -> return@mapNotNull null
+                        }
+                        ChatMessage(
+                            id = UUID.randomUUID().toString(),
+                            role = role,
+                            content = item.content
+                        )
+                    }
+                    response.content?.takeIf { it.isNotBlank() && items.isEmpty() }?.let { note ->
+                        messages = messages + ChatMessage(
+                            id = UUID.randomUUID().toString(),
+                            role = MessageRole.System,
+                            content = note
+                        )
+                    }
+                }
                 "token" -> {
                     val delta = response.delta.orEmpty()
                     if (delta.isEmpty()) return@collect
@@ -127,7 +276,22 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
                     }
                 }
                 "done" -> {
+                    val finalText = messages.lastOrNull { it.role == MessageRole.Assistant }?.content.orEmpty()
                     messages = messages.map { if (it.isStreaming) it.copy(isStreaming = false) else it }
+                    if (finalText.isNotBlank()) {
+                        scope.launch {
+                            runCatching {
+                                withContext(Dispatchers.IO) {
+                                    supabase().insert(
+                                        sessionId = config.sessionId,
+                                        senderName = AhccSupabaseClient.SENDER_HERMES,
+                                        content = finalText,
+                                        recipientName = AhccSupabaseClient.SENDER_DESKTOP,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 "error" -> {
                     messages = messages.map { if (it.isStreaming) it.copy(isStreaming = false) else it } +
@@ -150,6 +314,14 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
             ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", true)
         scope.launch {
             try {
+                withContext(Dispatchers.IO) {
+                    supabase().insert(
+                        sessionId = config.sessionId,
+                        senderName = AhccSupabaseClient.SENDER_DESKTOP,
+                        content = text,
+                        recipientName = AhccSupabaseClient.SENDER_HERMES,
+                    )
+                }
                 client.sendMessage(text)
             } catch (e: Exception) {
                 messages = messages.map {
@@ -165,15 +337,93 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
         }
     }
 
+    fun pickAndSendFile() {
+        if (connection != ConnectionState.Connected) return
+        val dialog = FileDialog(Frame(), "Attach file", FileDialog.LOAD)
+        dialog.isMultipleMode = false
+        dialog.isVisible = true
+        val dir = dialog.directory ?: return
+        val fileName = dialog.file ?: return
+        val file = File(dir, fileName)
+        if (!file.isFile) return
+        scope.launch {
+            try {
+                val lower = fileName.lowercase()
+                val isTextShare = lower.endsWith(".md") || lower.endsWith(".markdown") ||
+                    lower.endsWith(".txt") || lower.endsWith(".json") || lower.endsWith(".csv")
+                if (isTextShare && supabase().isConfigured) {
+                    val text = withContext(Dispatchers.IO) { file.readText(Charsets.UTF_8) }
+                    val mime = when {
+                        lower.endsWith(".md") || lower.endsWith(".markdown") -> "text/markdown"
+                        lower.endsWith(".json") -> "application/json"
+                        lower.endsWith(".csv") -> "text/csv"
+                        else -> "text/plain"
+                    }
+                    val marker = withContext(Dispatchers.IO) {
+                        supabase().uploadTextFile(
+                            sessionId = config.sessionId,
+                            senderName = AhccSupabaseClient.SENDER_DESKTOP,
+                            fileName = fileName,
+                            text = text,
+                            mime = mime,
+                            recipientName = AhccSupabaseClient.SENDER_ANDROID,
+                        )
+                    }
+                    val label = AhccSupabaseClient.parseFileMarker(marker)?.second ?: fileName
+                    messages = messages + ChatMessage(
+                        UUID.randomUUID().toString(),
+                        MessageRole.User,
+                        "[file] $label"
+                    )
+                    // Also notify Hermes briefly (optional chat context).
+                    client.sendMessage("Shared file via Supabase: $label")
+                    return@launch
+                }
+
+                val attachment = withContext(Dispatchers.IO) {
+                    DesktopMediaEnvelope.fromFile(file)
+                }
+                val caption = draft.trim().ifBlank { null }
+                draft = ""
+                val envelope = DesktopMediaEnvelope.buildText(caption, attachment, config.sessionId)
+                val placeholder = DesktopMediaEnvelope.placeholder(attachment, caption)
+                messages = messages +
+                    ChatMessage(UUID.randomUUID().toString(), MessageRole.User, placeholder) +
+                    ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", true)
+                withContext(Dispatchers.IO) {
+                    supabase().insert(
+                        sessionId = config.sessionId,
+                        senderName = AhccSupabaseClient.SENDER_DESKTOP,
+                        content = placeholder,
+                        recipientName = AhccSupabaseClient.SENDER_HERMES,
+                    )
+                }
+                client.sendMedia(envelope, placeholder)
+            } catch (e: Exception) {
+                messages = messages + ChatMessage(
+                    UUID.randomUUID().toString(),
+                    MessageRole.System,
+                    e.message ?: "file send failed"
+                )
+            }
+        }
+    }
+
     LayoutColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         LayoutRow(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             LayoutColumn(modifier = Modifier.weight(1f)) {
-                Text("AHCC Desktop", style = MaterialTheme.typography.headlineMedium)
-                Text(
-                    "${connection.name} · HTTP · ${config.model}",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.labelSmall
-                )
+                Text("AHCC Desktop v${AppVersion.LABEL}", style = MaterialTheme.typography.headlineMedium)
+                LayoutRow(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ConnectionIndicator(connection)
+                    Text(
+                        "${connectionLabel(connection)} · HTTP · ${config.model}",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
                 lastError?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall)
                 }
@@ -181,15 +431,24 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
             TextButton(onClick = {
                 client.clearHistory()
                 messages = emptyList()
-            }) { Text("Clear") }
+            }) {
+                Text("Clear", color = MaterialTheme.colorScheme.onSurface)
+            }
+            TextButton(onClick = { connectWithSession(forceNew = true) }) {
+                Text("New session", color = MaterialTheme.colorScheme.onSurface)
+            }
             TextButton(onClick = { showSettings = !showSettings }) {
-                Text(if (showSettings) "Chat" else "Settings")
+                Text(
+                    if (showSettings) "Chat" else "Settings",
+                    color = MaterialTheme.colorScheme.onSurface
+                )
             }
             IconButton(onClick = {
                 if (connection == ConnectionState.Connected || connection == ConnectionState.Connecting) {
                     client.disconnect()
+                    messages = emptyList()
                 } else {
-                    client.connect(config)
+                    connectWithSession(forceNew = false)
                 }
             }) {
                 Icon(
@@ -203,7 +462,18 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
         LayoutSpacer(modifier = Modifier.height(12.dp))
 
         if (showSettings) {
-            SettingsPanel(config) { config = it }
+            SettingsPanel(
+                config = config,
+                startOnLaunch = startOnLaunch,
+                onChange = {
+                    config = it
+                    persistConfig(it)
+                },
+                onStartOnLaunchChange = {
+                    startOnLaunch = it
+                    DesktopUiSettings.startOnLaunch = it
+                }
+            )
         } else {
             if (messages.isEmpty()) {
                 LayoutBox(
@@ -214,7 +484,7 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
                         Text("Android Hermes Cloud Chat", style = MaterialTheme.typography.displaySmall)
                         LayoutSpacer(modifier = Modifier.height(8.dp))
                         Text(
-                            "Desktop client · Nous Inference HTTP SSE.\nEnter — send, Shift+Enter — newline.",
+                            "Desktop client · Nous Inference HTTP SSE.\nEnter — send, Shift+Enter — newline.\nPaperclip — file via AHCC_MEDIA_V1.",
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -235,6 +505,16 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
+                IconButton(
+                    onClick = { pickAndSendFile() },
+                    enabled = connection == ConnectionState.Connected
+                ) {
+                    Icon(
+                        Icons.Default.AttachFile,
+                        contentDescription = "Attach file",
+                        tint = MaterialTheme.colorScheme.onBackground
+                    )
+                }
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { draft = it },
@@ -268,9 +548,44 @@ private fun DesktopChatApp(client: HermesHttpSseClient) {
 }
 
 @Composable
-private fun SettingsPanel(config: ConnectionConfig, onChange: (ConnectionConfig) -> Unit) {
+private fun ConnectionIndicator(state: ConnectionState) {
+    val color = when (state) {
+        ConnectionState.Connected -> Color(0xFF22C55E)
+        ConnectionState.Connecting -> Color(0xFFFBBF24)
+        ConnectionState.Error -> Color(0xFFEF4444)
+        ConnectionState.Disconnected -> Color(0xFF64748B)
+    }
+    LayoutBox(
+        modifier = Modifier
+            .size(10.dp)
+            .clip(CircleShape)
+            .background(color)
+    )
+}
+
+private fun connectionLabel(state: ConnectionState): String = when (state) {
+    ConnectionState.Connected -> "Connected"
+    ConnectionState.Connecting -> "Connecting"
+    ConnectionState.Error -> "Error"
+    ConnectionState.Disconnected -> "Disconnected"
+}
+
+@Composable
+private fun SettingsPanel(
+    config: ConnectionConfig,
+    startOnLaunch: Boolean,
+    onChange: (ConnectionConfig) -> Unit,
+    onStartOnLaunchChange: (Boolean) -> Unit,
+) {
     LayoutColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
         Text("Connection", style = MaterialTheme.typography.titleLarge)
+        LayoutRow(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = startOnLaunch,
+                onCheckedChange = onStartOnLaunchChange
+            )
+            Text("Start on launch", style = MaterialTheme.typography.bodyLarge)
+        }
         OutlinedTextField(
             value = config.inferenceBaseUrl,
             onValueChange = { onChange(config.copy(inferenceBaseUrl = it)) },
@@ -295,7 +610,35 @@ private fun SettingsPanel(config: ConnectionConfig, onChange: (ConnectionConfig)
         OutlinedTextField(
             value = config.sessionId,
             onValueChange = { onChange(config.copy(sessionId = it)) },
-            label = { Text("Session ID") },
+            label = { Text("Session ID (auto from Supabase last row)") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+        OutlinedTextField(
+            value = config.supabaseUrl,
+            onValueChange = { onChange(config.copy(supabaseUrl = it)) },
+            label = { Text("Supabase URL") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+        OutlinedTextField(
+            value = config.supabaseAnonKey,
+            onValueChange = { onChange(config.copy(supabaseAnonKey = it)) },
+            label = { Text("Supabase anon key") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+        OutlinedTextField(
+            value = config.agentApiBaseUrl,
+            onValueChange = { onChange(config.copy(agentApiBaseUrl = it)) },
+            label = { Text("Agent API base URL (session history; empty = auto)") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
+        OutlinedTextField(
+            value = config.host,
+            onValueChange = { onChange(config.copy(host = it)) },
+            label = { Text("Agent host (for history auto-detect)") },
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )

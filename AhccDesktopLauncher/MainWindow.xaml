@@ -1,0 +1,92 @@
+<Window x:Class="AhccDesktopLauncher.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="AHCC Desktop Launcher"
+        Height="360"
+        Width="600"
+        MinHeight="300"
+        MinWidth="520"
+        WindowStartupLocation="CenterScreen"
+        Background="#0B1F2A"
+        Loaded="Window_Loaded">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,16">
+            <TextBlock x:Name="TitleText"
+                       Text="AHCC Desktop Launcher"
+                       Foreground="#E8F4F3"
+                       FontSize="22"
+                       FontWeight="SemiBold" />
+            <TextBlock Text="Launch the Compose Desktop Hermes Cloud client"
+                       Foreground="#8AA8A6"
+                       FontSize="13"
+                       Margin="0,4,0,0" />
+        </StackPanel>
+
+        <Border Grid.Row="1"
+                Background="#123D45"
+                CornerRadius="10"
+                Padding="14">
+            <StackPanel>
+                <TextBlock Text="Launch target"
+                           Foreground="#6B8F8C"
+                           FontSize="12"
+                           Margin="0,0,0,8" />
+                <TextBlock x:Name="TargetText"
+                           Text="—"
+                           Foreground="#E8F4F3"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           TextWrapping="Wrap" />
+                <TextBlock x:Name="PathText"
+                           Text=""
+                           Foreground="#8AA8A6"
+                           FontSize="12"
+                           Margin="0,8,0,0"
+                           TextWrapping="Wrap" />
+                <TextBlock x:Name="StatusText"
+                           Text=""
+                           Foreground="#93C5FD"
+                           FontSize="12"
+                           Margin="0,12,0,0"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
+
+        <CheckBox x:Name="AutoStartCheckBox"
+                  Grid.Row="2"
+                  Content="Start on launch"
+                  Foreground="#E8F4F3"
+                  Margin="0,16,0,12"
+                  Checked="AutoStartCheckBox_Changed"
+                  Unchecked="AutoStartCheckBox_Changed" />
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Refresh"
+                    Width="110"
+                    Height="34"
+                    Margin="0,0,8,0"
+                    Background="#334155"
+                    Foreground="#F8FAFC"
+                    BorderThickness="0"
+                    Cursor="Hand"
+                    Click="RefreshButton_Click" />
+            <Button x:Name="LaunchButton"
+                    Content="Launch AHCC Desktop"
+                    Width="190"
+                    Height="34"
+                    Background="#1FA6A0"
+                    Foreground="#0B1F2A"
+                    BorderThickness="0"
+                    Cursor="Hand"
+                    FontWeight="SemiBold"
+                    Click="LaunchButton_Click" />
+        </StackPanel>
+    </Grid>
+</Window>

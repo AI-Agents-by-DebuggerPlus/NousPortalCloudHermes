@@ -158,11 +158,20 @@ class HermesWebSocketManager {
     }
 
     suspend fun sendMessage(text: String, sessionId: String? = currentConfig?.sessionId) {
+        sendMediaMessage(text = text, attachments = null, sessionId = sessionId)
+    }
+
+    suspend fun sendMediaMessage(
+        text: String,
+        attachments: List<com.nous.ahcc.domain.model.MediaAttachmentWire>?,
+        sessionId: String? = currentConfig?.sessionId
+    ) {
         val payload = HermesRequest(
-            event = "message",
+            event = "user_message",
             session_id = sessionId,
             content = text,
-            data = HermesMessageData(role = "user", content = text)
+            data = HermesMessageData(role = "user", content = text),
+            attachments = attachments
         )
         val encoded = json.encodeToString(HermesRequest.serializer(), payload)
         Log.i(TAG, "-> send(${encoded.length}): ${encoded.take(240)}")

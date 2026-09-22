@@ -1,0 +1,22 @@
+---
+description: UI contrast — light text on dark backgrounds for all AHCC clients
+alwaysApply: true
+---
+
+# Light text on dark background
+
+Always use **light text on dark backgrounds** in AHCC / AHCCD / AHCCDV (and related UI).
+
+## Rules
+
+- Window/page background: dark (e.g. `#0B1F2A`, `#123D45`).
+- Primary text / labels on chrome: light (e.g. `#E8F4F3`).
+- Secondary text: muted light (e.g. `#8AA8A6`), never near-white on near-white.
+- Buttons, tabs, chips, TextButtons: **dark fill + light foreground** (or transparent/dark + light text). Do **not** use default Windows/Material light tab/button chrome with light text.
+- Never leave system-default light TabItem / Button styles on a dark window — override so text stays readable.
+- If a control has a light fill, its text must be dark; prefer avoiding light fills in these apps.
+
+## Examples
+
+- Good: Tab `Background="#1A4550"` + `Foreground="#E8F4F3"`
+- Bad: Default light tab header + white/light `Foreground` (text disappears)

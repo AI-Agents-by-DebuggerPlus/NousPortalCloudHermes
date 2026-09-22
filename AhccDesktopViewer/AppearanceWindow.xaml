@@ -1,0 +1,129 @@
+<Window x:Class="AhccDesktopViewer.AppearanceWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Appearance"
+        Height="640"
+        Width="440"
+        MinHeight="520"
+        MinWidth="400"
+        Background="#0B1F2A"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Closed="Window_Closed">
+    <Grid>
+    <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16">
+        <StackPanel>
+            <TextBlock Text="Fonts &amp; colors"
+                       Foreground="#E8F4F3" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,4" />
+            <TextBlock Text="Changes apply live to the chat window."
+                       Foreground="#8AA8A6" FontSize="12" Margin="0,0,0,16" TextWrapping="Wrap" />
+
+            <TextBlock Text="Response font size (Hermes)" Foreground="#8AA8A6" Margin="0,0,0,4" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <Slider x:Name="ResponseFontSlider" Width="260" Minimum="12" Maximum="100"
+                        TickFrequency="1" IsSnapToTickEnabled="True"
+                        ValueChanged="Any_Changed" />
+                <TextBlock x:Name="ResponseFontLabel" Foreground="#E8F4F3"
+                           VerticalAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+
+            <TextBlock Text="Request font size (user)" Foreground="#8AA8A6" Margin="0,0,0,4" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <Slider x:Name="RequestFontSlider" Width="260" Minimum="12" Maximum="100"
+                        TickFrequency="1" IsSnapToTickEnabled="True"
+                        ValueChanged="Any_Changed" />
+                <TextBlock x:Name="RequestFontLabel" Foreground="#E8F4F3"
+                           VerticalAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+
+            <TextBlock Text="Padding left (content)" Foreground="#8AA8A6" Margin="0,0,0,4" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <Slider x:Name="PaddingLeftSlider" Width="260" Minimum="0" Maximum="200"
+                        TickFrequency="1" IsSnapToTickEnabled="True"
+                        ValueChanged="Any_Changed" />
+                <TextBlock x:Name="PaddingLeftLabel" Foreground="#E8F4F3"
+                           VerticalAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+
+            <TextBlock Text="Padding top (content)" Foreground="#8AA8A6" Margin="0,0,0,4" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,16">
+                <Slider x:Name="PaddingTopSlider" Width="260" Minimum="0" Maximum="200"
+                        TickFrequency="1" IsSnapToTickEnabled="True"
+                        ValueChanged="Any_Changed" />
+                <TextBlock x:Name="PaddingTopLabel" Foreground="#E8F4F3"
+                           VerticalAlignment="Center" Margin="12,0,0,0" />
+            </StackPanel>
+
+            <TextBlock Text="Response text color" Foreground="#8AA8A6" Margin="0,0,0,6" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <Border x:Name="ResponseTextSwatch" Width="36" Height="28" CornerRadius="4"
+                        BorderBrush="#2A5A62" BorderThickness="1" Margin="0,0,8,0" />
+                <Button Content="Palette…" Width="100" Height="28" Click="PickResponseText_Click" />
+            </StackPanel>
+            <WrapPanel x:Name="ResponseTextPalette" Margin="0,0,0,16" />
+
+            <TextBlock Text="Request text color" Foreground="#8AA8A6" Margin="0,0,0,6" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <Border x:Name="RequestTextSwatch" Width="36" Height="28" CornerRadius="4"
+                        BorderBrush="#2A5A62" BorderThickness="1" Margin="0,0,8,0" />
+                <Button Content="Palette…" Width="100" Height="28" Click="PickRequestText_Click" />
+            </StackPanel>
+            <WrapPanel x:Name="RequestTextPalette" Margin="0,0,0,16" />
+
+            <TextBlock Text="Message bubble background" Foreground="#8AA8A6" Margin="0,0,0,6" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <Border x:Name="BubbleBgSwatch" Width="36" Height="28" CornerRadius="4"
+                        BorderBrush="#2A5A62" BorderThickness="1" Margin="0,0,8,0" />
+                <Button Content="Palette…" Width="100" Height="28" Click="PickBubbleBg_Click" />
+            </StackPanel>
+            <WrapPanel x:Name="BubbleBgPalette" Margin="0,0,0,16" />
+
+            <TextBlock Text="Chat area background" Foreground="#8AA8A6" Margin="0,0,0,6" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <Border x:Name="ChatAreaBgSwatch" Width="36" Height="28" CornerRadius="4"
+                        BorderBrush="#2A5A62" BorderThickness="1" Margin="0,0,8,0" />
+                <Button Content="Palette…" Width="100" Height="28" Click="PickChatAreaBg_Click" />
+            </StackPanel>
+            <WrapPanel x:Name="ChatAreaBgPalette" Margin="0,0,0,16" />
+
+            <CheckBox x:Name="SolidBackgroundCheck" Content="Solid background (entire chat area)"
+                      Foreground="#E8F4F3" Margin="0,0,0,8"
+                      Checked="Any_Changed" Unchecked="Any_Changed" />
+            <TextBlock Text="Solid background color" Foreground="#8AA8A6" Margin="0,0,0,6" />
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <Border x:Name="SolidBgSwatch" Width="36" Height="28" CornerRadius="4"
+                        BorderBrush="#2A5A62" BorderThickness="1" Margin="0,0,8,0" />
+                <Button Content="Palette…" Width="100" Height="28" Click="PickSolidBg_Click" />
+            </StackPanel>
+            <WrapPanel x:Name="SolidBgPalette" Margin="0,0,0,12" />
+
+            <CheckBox x:Name="TextOnlyCheck" Content="Text only (no senders, bubbles, or frames)"
+                      Foreground="#E8F4F3" Margin="0,0,0,20"
+                      Checked="Any_Changed" Unchecked="Any_Changed" />
+
+            <StackPanel Orientation="Horizontal">
+                <Button Content="Save" Width="100" Height="34" Margin="0,0,8,0" Click="Save_Click" />
+                <Button Content="Close" Width="100" Height="34" Click="Close_Click" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+
+        <Border x:Name="ToastBanner"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Bottom"
+                Margin="16,0,16,20"
+                Padding="18,12"
+                Background="#1A4550"
+                CornerRadius="8"
+                BorderBrush="#2A5A62"
+                BorderThickness="1"
+                Visibility="Collapsed"
+                Panel.ZIndex="200">
+            <TextBlock x:Name="ToastText"
+                       Text="Appearance settings saved"
+                       Foreground="#E8F4F3"
+                       FontSize="13"
+                       FontWeight="SemiBold" />
+        </Border>
+    </Grid>
+</Window>

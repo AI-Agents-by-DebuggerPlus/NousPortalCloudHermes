@@ -73,9 +73,12 @@ class HermesHttpSseClient {
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
     private val history = mutableListOf<ChatTurn>()
+    private var agentApiBase: String? = null
 
     fun connect(config: ConnectionConfig) {
         currentConfig = config
+        agentApiBase = null
+        history.clear()
         ensureClient()
         scope.launch {
             _connectionState.value = ConnectionState.Connecting
@@ -89,6 +92,11 @@ class HermesHttpSseClient {
                 if (!response.status.isSuccess()) {
                     error("Inference auth failed: HTTP ${response.status.value}")
                 }
+
+                // Server session history is intentionally not loaded — current session only.
+                history.clear()
+                agentApiBase = null
+
                 _connectionState.value = ConnectionState.Connected
                 _lastError.value = null
                 Log.i(TAG, "CONNECTED via HTTP SSE base=$base model=${config.model}")
@@ -101,6 +109,38 @@ class HermesHttpSseClient {
     }
 
     suspend fun sendMessage(text: String, sessionId: String? = currentConfig?.sessionId) {
+        sendUserContent(
+            historyText = text,
+            requestContent = TextRequestContent.Plain(text),
+            sessionId = sessionId
+        )
+    }
+
+    /**
+     * Send media via AHCC_MEDIA_V1 text envelope; photos also as OpenAI image_url when possible.
+     */
+    suspend fun sendMedia(
+        envelopeText: String,
+        historyPlaceholder: String,
+        photoJpegBase64: String?,
+        sessionId: String? = currentConfig?.sessionId
+    ) {
+        val requestContent = if (photoJpegBase64 != null) {
+            TextRequestContent.Multimodal(
+                text = envelopeText,
+                jpegBase64 = photoJpegBase64
+            )
+        } else {
+            TextRequestContent.Plain(envelopeText)
+        }
+        sendUserContent(historyPlaceholder, requestContent, sessionId)
+    }
+
+    private suspend fun sendUserContent(
+        historyText: String,
+        requestContent: TextRequestContent,
+        sessionId: String?
+    ) {
         val config = currentConfig ?: error("Not connected")
         if (_connectionState.value != ConnectionState.Connected) {
             error("HTTP transport is not connected")
@@ -108,48 +148,97 @@ class HermesHttpSseClient {
         sendMutex.withLock {
             streamJob?.cancel()
             streamJob = scope.launch {
-                streamCompletion(config, text, sessionId)
+                streamCompletion(config, historyText, requestContent, sessionId)
             }
             streamJob?.join()
         }
     }
 
+    private sealed class TextRequestContent {
+        data class Plain(val text: String) : TextRequestContent()
+        data class Multimodal(val text: String, val jpegBase64: String) : TextRequestContent()
+    }
+
     private suspend fun streamCompletion(
         config: ConnectionConfig,
-        text: String,
+        historyText: String,
+        requestContent: TextRequestContent,
         sessionId: String?
     ) {
-        history += ChatTurn(role = "user", content = text)
+        history += ChatTurn(role = "user", content = historyText)
         val base = config.inferenceBaseUrl.trimEnd('/')
-        val body = buildJsonObject {
-            put("model", config.model)
-            put("stream", true)
-            // Prefer non-thinking answers so CoT does not flood the chat bubble
-            put(
-                "thinking",
-                buildJsonObject {
-                    put("type", "disabled")
-                }
-            )
-            put(
-                "messages",
-                buildJsonArray {
-                    history.forEach { turn ->
+
+        suspend fun postOnce(useMultimodal: Boolean): Boolean {
+            val body = buildJsonObject {
+                put("model", config.model)
+                put("stream", true)
+                put(
+                    "thinking",
+                    buildJsonObject {
+                        put("type", "disabled")
+                    }
+                )
+                put(
+                    "messages",
+                    buildJsonArray {
+                        history.dropLast(1).forEach { turn ->
+                            add(
+                                buildJsonObject {
+                                    put("role", turn.role)
+                                    put("content", turn.content)
+                                }
+                            )
+                        }
                         add(
                             buildJsonObject {
-                                put("role", turn.role)
-                                put("content", turn.content)
+                                put("role", "user")
+                                when {
+                                    useMultimodal && requestContent is TextRequestContent.Multimodal -> {
+                                        put(
+                                            "content",
+                                            buildJsonArray {
+                                                add(
+                                                    buildJsonObject {
+                                                        put("type", "text")
+                                                        put("text", requestContent.text)
+                                                    }
+                                                )
+                                                add(
+                                                    buildJsonObject {
+                                                        put("type", "image_url")
+                                                        put(
+                                                            "image_url",
+                                                            buildJsonObject {
+                                                                put(
+                                                                    "url",
+                                                                    "data:image/jpeg;base64,${requestContent.jpegBase64}"
+                                                                )
+                                                            }
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        )
+                                    }
+                                    requestContent is TextRequestContent.Plain -> {
+                                        put("content", requestContent.text)
+                                    }
+                                    requestContent is TextRequestContent.Multimodal -> {
+                                        put("content", requestContent.text)
+                                    }
+                                }
                             }
                         )
                     }
-                }
-            )
-            sessionId?.let { put("user", it) }
-        }
+                )
+                sessionId?.let { put("user", it) }
+            }
 
-        Log.i(TAG, "-> POST $base/v1/chat/completions model=${config.model}")
-        val http = client ?: error("HttpClient missing")
-        try {
+            Log.i(
+                TAG,
+                "-> POST $base/v1/chat/completions model=${config.model} multimodal=$useMultimodal"
+            )
+            val http = client ?: error("HttpClient missing")
             http.preparePost("$base/v1/chat/completions") {
                 contentType(ContentType.Application.Json)
                 if (config.apiKey.isNotBlank()) {
@@ -188,9 +277,24 @@ class HermesHttpSseClient {
                 )
                 Log.i(TAG, "stream done chars=${finalText.length}")
             }
+            return true
+        }
+
+        try {
+            val wantMulti = requestContent is TextRequestContent.Multimodal
+            try {
+                postOnce(useMultimodal = wantMulti)
+            } catch (e: Exception) {
+                if (wantMulti) {
+                    Log.w(TAG, "multimodal failed, retry text-only: ${e.message}")
+                    postOnce(useMultimodal = false)
+                } else {
+                    throw e
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "stream failed: ${e.message}", e)
-            if (history.lastOrNull()?.content == text && history.lastOrNull()?.role == "user") {
+            if (history.lastOrNull()?.content == historyText && history.lastOrNull()?.role == "user") {
                 history.removeAt(history.lastIndex)
             }
             _responses.emit(
@@ -223,6 +327,7 @@ class HermesHttpSseClient {
         streamJob?.cancel()
         streamJob = null
         history.clear()
+        agentApiBase = null
         client?.close()
         client = null
         _connectionState.value = ConnectionState.Disconnected
@@ -238,7 +343,7 @@ class HermesHttpSseClient {
         client = HttpClient(CIO) {
             install(HttpTimeout) {
                 requestTimeoutMillis = 180_000
-                connectTimeoutMillis = 30_000
+                connectTimeoutMillis = 8_000
                 socketTimeoutMillis = 180_000
             }
         }

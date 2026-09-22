@@ -30,8 +30,13 @@ secrets/
 **/*.dex
 **/*.class
 **/bin/
+**/obj/
 **/gen/
 **/out/
+**/.kotlin/
+
+# --- Local temp / session dumps (do not commit) ---
+Docs/Temp/
 
 # --- IDE / OS ---
 .vs/

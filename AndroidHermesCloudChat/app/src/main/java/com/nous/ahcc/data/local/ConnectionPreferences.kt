@@ -28,6 +28,9 @@ class ConnectionPreferences(private val context: Context) {
         val transport = stringPreferencesKey("transport")
         val inferenceBaseUrl = stringPreferencesKey("inference_base_url")
         val model = stringPreferencesKey("model")
+        val agentApiBaseUrl = stringPreferencesKey("agent_api_base_url")
+        val supabaseUrl = stringPreferencesKey("supabase_url")
+        val supabaseAnonKey = stringPreferencesKey("supabase_anon_key")
     }
 
     val configFlow: Flow<ConnectionConfig> = context.dataStore.data.map { prefs ->
@@ -40,7 +43,12 @@ class ConnectionPreferences(private val context: Context) {
             keepAliveInBackground = prefs[Keys.keepAlive] ?: true,
             transport = TransportMode.fromStorage(prefs[Keys.transport] ?: HermesConfig.TRANSPORT),
             inferenceBaseUrl = prefs[Keys.inferenceBaseUrl] ?: HermesConfig.INFERENCE_BASE_URL,
-            model = prefs[Keys.model] ?: HermesConfig.MODEL
+            model = prefs[Keys.model] ?: HermesConfig.MODEL,
+            agentApiBaseUrl = prefs[Keys.agentApiBaseUrl] ?: HermesConfig.AGENT_API_BASE_URL,
+            supabaseUrl = (prefs[Keys.supabaseUrl] ?: HermesConfig.SUPABASE_URL)
+                .ifBlank { HermesConfig.SUPABASE_URL },
+            supabaseAnonKey = (prefs[Keys.supabaseAnonKey] ?: HermesConfig.SUPABASE_ANON_KEY)
+                .ifBlank { HermesConfig.SUPABASE_ANON_KEY }
         )
     }
 
@@ -56,6 +64,9 @@ class ConnectionPreferences(private val context: Context) {
             prefs[Keys.inferenceBaseUrl] = config.inferenceBaseUrl.trim()
                 .ifBlank { HermesConfig.INFERENCE_BASE_URL }
             prefs[Keys.model] = config.model.trim().ifBlank { HermesConfig.MODEL }
+            prefs[Keys.agentApiBaseUrl] = config.agentApiBaseUrl.trim()
+            prefs[Keys.supabaseUrl] = config.supabaseUrl.trim()
+            prefs[Keys.supabaseAnonKey] = config.supabaseAnonKey.trim()
         }
     }
 }

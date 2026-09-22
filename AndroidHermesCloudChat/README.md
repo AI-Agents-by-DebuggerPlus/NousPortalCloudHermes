@@ -28,9 +28,18 @@ Open **Settings**, set host / port / API key from Nous Portal, then tap the link
 
 ## Desktop
 
+**WPF Launcher:** `AhccDesktopLauncher/` или `Launch-AhccDesktopLauncher.bat`
+
+**Bat / VBS:**
+
+- `Launch-AHCC-Desktop.bat` — console + Gradle run
+- `Launch-AHCC-Desktop.vbs` — без окна консоли
+
+Or from terminal:
+
 ```bash
 cd AndroidHermesCloudChat
 ./gradlew :desktop:run
 ```
 
-Desktop uses the same Nous Inference HTTP SSE transport. **Enter** sends, **Shift+Enter** inserts a newline.
+Desktop uses Nous Inference HTTP SSE. **Enter** sends, **Shift+Enter** newline, **paperclip** attaches a file (`AHCC_MEDIA_V1`). Header shows build version (`AppVersion.LABEL`).

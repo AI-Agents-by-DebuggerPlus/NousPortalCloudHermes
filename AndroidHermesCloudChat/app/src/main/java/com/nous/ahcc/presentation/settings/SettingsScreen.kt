@@ -61,6 +61,15 @@ fun SettingsScreen(
         mutableStateOf(state.config.inferenceBaseUrl)
     }
     var model by remember(state.config.model) { mutableStateOf(state.config.model) }
+    var agentApiBaseUrl by remember(state.config.agentApiBaseUrl) {
+        mutableStateOf(state.config.agentApiBaseUrl)
+    }
+    var supabaseUrl by remember(state.config.supabaseUrl) {
+        mutableStateOf(state.config.supabaseUrl)
+    }
+    var supabaseAnonKey by remember(state.config.supabaseAnonKey) {
+        mutableStateOf(state.config.supabaseAnonKey)
+    }
     var showKey by remember { mutableStateOf(false) }
 
     Column(
@@ -120,7 +129,33 @@ fun SettingsScreen(
             OutlinedTextField(
                 value = sessionId,
                 onValueChange = { sessionId = it },
-                label = { Text("Session ID") },
+                label = { Text("Session ID (auto from Supabase last row)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = supabaseUrl,
+                onValueChange = { supabaseUrl = it },
+                label = { Text("Supabase URL") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = supabaseAnonKey,
+                onValueChange = { supabaseAnonKey = it },
+                label = { Text("Supabase anon key") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                visualTransformation = if (showKey) {
+                    VisualTransformation.None
+                } else {
+                    PasswordVisualTransformation()
+                }
+            )
+            OutlinedTextField(
+                value = agentApiBaseUrl,
+                onValueChange = { agentApiBaseUrl = it },
+                label = { Text("Agent API base URL (history; empty = auto)") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
@@ -190,7 +225,10 @@ fun SettingsScreen(
                         transport = if (useHttpSse) TransportMode.HttpSse else TransportMode.WebSocket,
                         inferenceBaseUrl = inferenceBaseUrl.trim()
                             .ifBlank { HermesConfig.INFERENCE_BASE_URL },
-                        model = model.trim().ifBlank { HermesConfig.MODEL }
+                        model = model.trim().ifBlank { HermesConfig.MODEL },
+                        agentApiBaseUrl = agentApiBaseUrl.trim(),
+                        supabaseUrl = supabaseUrl.trim(),
+                        supabaseAnonKey = supabaseAnonKey.trim()
                     )
                 )
                 onBack()

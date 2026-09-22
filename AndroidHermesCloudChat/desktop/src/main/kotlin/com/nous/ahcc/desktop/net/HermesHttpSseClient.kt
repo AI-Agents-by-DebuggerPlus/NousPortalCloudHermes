@@ -2,6 +2,7 @@ package com.nous.ahcc.desktop.net
 
 import com.nous.ahcc.desktop.model.ConnectionConfig
 import com.nous.ahcc.desktop.model.ConnectionState
+import com.nous.ahcc.desktop.model.HermesHistoryItem
 import com.nous.ahcc.desktop.model.HermesResponse
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
@@ -46,6 +47,8 @@ class HermesHttpSseClient {
     private var currentConfig: ConnectionConfig? = null
     private var streamJob: Job? = null
     private val history = mutableListOf<Pair<String, String>>()
+    /** When set, chat goes through Hermes Agent session API (server-owned history). */
+    private var agentApiBase: String? = null
 
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -58,6 +61,8 @@ class HermesHttpSseClient {
 
     fun connect(config: ConnectionConfig) {
         currentConfig = config
+        agentApiBase = null
+        history.clear()
         ensureClient()
         scope.launch {
             _connectionState.value = ConnectionState.Connecting
@@ -71,6 +76,11 @@ class HermesHttpSseClient {
                 if (!response.status.isSuccess()) {
                     error("Auth failed: HTTP ${response.status.value}")
                 }
+
+                // Server session history is intentionally not loaded — current session only.
+                history.clear()
+                agentApiBase = null
+
                 _connectionState.value = ConnectionState.Connected
                 _lastError.value = null
                 println("[AHCC-HTTP] CONNECTED $base model=${config.model}")
@@ -83,17 +93,99 @@ class HermesHttpSseClient {
     }
 
     suspend fun sendMessage(text: String) {
+        sendUserTurn(historyText = text, requestText = text)
+    }
+
+    /** Send AHCC_MEDIA_V1 envelope; history keeps a short placeholder. */
+    suspend fun sendMedia(envelopeText: String, historyPlaceholder: String) {
+        sendUserTurn(historyText = historyPlaceholder, requestText = envelopeText)
+    }
+
+    private suspend fun sendUserTurn(historyText: String, requestText: String) {
         val config = currentConfig ?: error("Not connected")
         if (_connectionState.value != ConnectionState.Connected) error("Not connected")
         sendMutex.withLock {
             streamJob?.cancel()
-            streamJob = scope.launch { stream(config, text) }
+            streamJob = scope.launch {
+                val agentBase = agentApiBase
+                if (agentBase != null) {
+                    streamAgentSession(config, agentBase, historyText, requestText)
+                } else {
+                    streamInference(config, historyText, requestText)
+                }
+            }
             streamJob?.join()
         }
     }
 
-    private suspend fun stream(config: ConnectionConfig, text: String) {
-        history += "user" to text
+    private suspend fun streamAgentSession(
+        config: ConnectionConfig,
+        agentBase: String,
+        historyText: String,
+        requestText: String,
+    ) {
+        history += "user" to historyText
+        val http = client ?: error("no client")
+        val body = buildJsonObject {
+            put("input", requestText)
+        }
+        try {
+            http.preparePost("$agentBase/api/sessions/${config.sessionId}/chat/stream") {
+                contentType(ContentType.Application.Json)
+                header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+                setBody(json.encodeToString(JsonObject.serializer(), body))
+            }.execute { response ->
+                if (!response.status.isSuccess()) {
+                    throw IllegalStateException("HTTP ${response.status.value}: ${response.bodyAsText().take(200)}")
+                }
+                val channel = response.bodyAsChannel()
+                val assistant = StringBuilder()
+                var eventName = ""
+                while (!channel.isClosedForRead) {
+                    val line = channel.readUTF8Line() ?: break
+                    if (line.isBlank()) continue
+                    if (line.startsWith(":")) continue
+                    if (line.startsWith("event:")) {
+                        eventName = line.removePrefix("event:").trim()
+                        continue
+                    }
+                    if (!line.startsWith("data:")) continue
+                    val payload = line.removePrefix("data:").trim()
+                    if (payload == "[DONE]") break
+                    when (eventName) {
+                        "assistant.delta", "message.delta" -> {
+                            val delta = extractAgentDelta(payload) ?: continue
+                            assistant.append(delta)
+                            _responses.emit(HermesResponse(event = "token", delta = delta))
+                        }
+                        "run.failed", "error" -> {
+                            val err = extractAgentError(payload) ?: payload
+                            throw IllegalStateException(err)
+                        }
+                        "run.completed", "run.cancelled" -> {
+                            // terminal
+                        }
+                    }
+                }
+                val finalText = assistant.toString()
+                if (finalText.isNotBlank()) history += "assistant" to finalText
+                _responses.emit(HermesResponse(event = "done", content = finalText, session_id = config.sessionId))
+            }
+        } catch (e: Exception) {
+            if (history.lastOrNull()?.first == "user" && history.lastOrNull()?.second == historyText) {
+                history.removeAt(history.lastIndex)
+            }
+            // Fall back to Inference if agent stream fails mid-flight.
+            println("[AHCC-HTTP] agent session chat failed, fallback inference: ${e.message}")
+            agentApiBase = null
+            streamInference(config, historyText, requestText)
+        }
+    }
+
+    private suspend fun streamInference(config: ConnectionConfig, historyText: String, requestText: String) {
+        if (history.lastOrNull()?.first != "user" || history.lastOrNull()?.second != historyText) {
+            history += "user" to historyText
+        }
         val base = config.inferenceBaseUrl.trimEnd('/')
         val body = buildJsonObject {
             put("model", config.model)
@@ -102,12 +194,16 @@ class HermesHttpSseClient {
             put(
                 "messages",
                 buildJsonArray {
-                    history.forEach { (role, content) ->
+                    history.dropLast(1).forEach { (role, content) ->
                         add(buildJsonObject {
                             put("role", role)
                             put("content", content)
                         })
                     }
+                    add(buildJsonObject {
+                        put("role", "user")
+                        put("content", requestText)
+                    })
                 }
             )
             put("user", config.sessionId)
@@ -138,12 +234,28 @@ class HermesHttpSseClient {
                 _responses.emit(HermesResponse(event = "done", content = finalText, session_id = config.sessionId))
             }
         } catch (e: Exception) {
-            if (history.lastOrNull()?.first == "user" && history.lastOrNull()?.second == text) {
+            if (history.lastOrNull()?.first == "user" && history.lastOrNull()?.second == historyText) {
                 history.removeAt(history.lastIndex)
             }
             _responses.emit(HermesResponse(event = "error", error = e.message))
             _lastError.value = e.message
         }
+    }
+
+    private fun extractAgentDelta(payload: String): String? = try {
+        val root = json.parseToJsonElement(payload) as? JsonObject ?: return null
+        (root["delta"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() }
+            ?: (root["content"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun extractAgentError(payload: String): String? = try {
+        val root = json.parseToJsonElement(payload) as? JsonObject ?: return null
+        (root["error"] as? JsonPrimitive)?.contentOrNull
+            ?: (root["message"] as? JsonPrimitive)?.contentOrNull
+    } catch (_: Exception) {
+        null
     }
 
     private fun extractContent(payload: String): String? = try {
@@ -158,6 +270,7 @@ class HermesHttpSseClient {
     fun disconnect() {
         streamJob?.cancel()
         history.clear()
+        agentApiBase = null
         client?.close()
         client = null
         _connectionState.value = ConnectionState.Disconnected
@@ -170,7 +283,7 @@ class HermesHttpSseClient {
         client = HttpClient(CIO) {
             install(HttpTimeout) {
                 requestTimeoutMillis = 180_000
-                connectTimeoutMillis = 30_000
+                connectTimeoutMillis = 8_000
                 socketTimeoutMillis = 180_000
             }
         }
