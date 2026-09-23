@@ -353,9 +353,7 @@ class HermesChatViewModel(
             "voice ready ${result.file.name} ${result.bytes.size}B ${result.durationMs}ms → Hermes"
         )
         val caption = _uiState.value.draft.trim().ifBlank {
-            "Voice note (audio/mp4, ${result.durationMs} ms).\n" +
-                "Transcribe the speech. Reply with ONLY the transcription text — " +
-                "no preamble, no summary, no questions."
+            "Голосовое сообщение (${result.durationMs} ms)"
         }
         val attachment = ChatAttachment(
             id = result.id,
@@ -482,7 +480,6 @@ class HermesChatViewModel(
             return
         }
         val sessionId = _uiState.value.config.sessionId
-        val envelope = MediaEnvelopeCodec.buildOutboundText(caption, attachments, sessionId)
         val wires = MediaEnvelopeCodec.wiresOf(attachments)
         val placeholder = buildString {
             if (!caption.isNullOrBlank()) append(caption).append('\n')
@@ -500,7 +497,7 @@ class HermesChatViewModel(
         Log.i(
             TAG,
             "sendAttachments kind=${first.kind} name=${first.name} raw=${first.bytes.size}B " +
-                "envelopeChars=${envelope.length} → Inference + Supabase placeholder"
+                "wsCaptionChars=${placeholder.length} attachments=${wires.size} → WebSocket"
         )
         beginSend(
             userMessage = ChatMessage(
@@ -522,7 +519,7 @@ class HermesChatViewModel(
                 )
             }
             chatGateway.sendMedia(
-                envelopeText = envelope,
+                envelopeText = "",
                 historyPlaceholder = placeholder,
                 photoJpegBase64 = photoB64,
                 attachmentWires = wires,

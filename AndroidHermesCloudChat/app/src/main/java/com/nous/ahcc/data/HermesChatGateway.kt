@@ -19,7 +19,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Facade that routes chat over HTTP SSE (Nous Inference) or WebSocket (local Hermes).
+ * Chat facade. Production path is Hermes Agent WebSocket (push frames only).
+ * [HermesHttpSseClient] stays compiled as an unused legacy fallback; the UI cannot select it.
  */
 class HermesChatGateway(
     private val webSocket: HermesWebSocketManager = HermesWebSocketManager(),
@@ -27,7 +28,7 @@ class HermesChatGateway(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var collectJobs = mutableListOf<Job>()
-    private var activeMode: TransportMode = TransportMode.HttpSse
+    private var activeMode: TransportMode = TransportMode.WebSocket
 
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -40,12 +41,10 @@ class HermesChatGateway(
 
     fun connect(config: ConnectionConfig) {
         disconnect(clearHttpHistory = false)
-        activeMode = config.transport
+        // User-facing path is always the agent WebSocket, even if old prefs said HTTP SSE.
+        activeMode = TransportMode.WebSocket
         wireActiveTransport()
-        when (config.transport) {
-            TransportMode.HttpSse -> httpSse.connect(config)
-            TransportMode.WebSocket -> webSocket.connect(config)
-        }
+        webSocket.connect(config.copy(transport = TransportMode.WebSocket))
     }
 
     suspend fun sendMessage(text: String, sessionId: String? = null) {
@@ -70,7 +69,8 @@ class HermesChatGateway(
                 sessionId = sessionId
             )
             TransportMode.WebSocket -> webSocket.sendMediaMessage(
-                text = envelopeText,
+                // Short caption only. Binary payload is attachments[].data (ahcc.media.v1).
+                text = historyPlaceholder,
                 attachments = attachmentWires,
                 sessionId = sessionId
             )

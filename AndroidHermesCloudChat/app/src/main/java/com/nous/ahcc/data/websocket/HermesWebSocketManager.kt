@@ -174,7 +174,12 @@ class HermesWebSocketManager {
             attachments = attachments
         )
         val encoded = json.encodeToString(HermesRequest.serializer(), payload)
-        Log.i(TAG, "-> send(${encoded.length}): ${encoded.take(240)}")
+        val attachSummary = attachments.orEmpty().joinToString { "${it.kind}:${it.size}B" }
+        Log.i(
+            TAG,
+            "-> send chars=${encoded.length} attachments=[${attachSummary.ifBlank { "none" }}] " +
+                "content=${text.take(120)}"
+        )
         sendMutex.withLock {
             val active = session ?: error("WebSocket is not connected")
             active.send(Frame.Text(encoded))

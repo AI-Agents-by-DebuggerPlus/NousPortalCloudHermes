@@ -13,8 +13,9 @@ object HermesConfig {
     const val USE_TLS = true
 
     const val INFERENCE_BASE_URL = "https://inference-api.nousresearch.com"
+    /** Legacy HTTP SSE only. The WebSocket agent path does not send this field. */
     const val MODEL = "z-ai/glm-4.5-air"
-    const val TRANSPORT = "http_sse"
+    const val TRANSPORT = "websocket"
 
     fun getWebSocketUrl(sessionId: String = SESSION_ID): String {
         return "wss://$HOST/v1/ws/chat?session_id=$sessionId"

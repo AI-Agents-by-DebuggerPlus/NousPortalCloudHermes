@@ -187,12 +187,7 @@ fun ChatScreen(
         topBar = {
             ChatTopBar(
                 connectionState = state.connectionState,
-                hostLabel = when (state.config.transport) {
-                    com.nous.ahcc.domain.model.TransportMode.HttpSse ->
-                        "HTTP В· ${state.config.model}"
-                    com.nous.ahcc.domain.model.TransportMode.WebSocket ->
-                        "WS В· ${state.config.host}:${state.config.port}"
-                },
+                hostLabel = "WS · ${state.config.host}:${state.config.port}",
                 recording = state.isRecording,
                 onToggleConnection = {
                     if (state.connectionState == ConnectionState.Connected ||

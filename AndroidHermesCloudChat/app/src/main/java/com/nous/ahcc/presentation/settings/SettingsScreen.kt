@@ -55,13 +55,6 @@ fun SettingsScreen(
     var keepAlive by remember(state.config.keepAliveInBackground) {
         mutableStateOf(state.config.keepAliveInBackground)
     }
-    var useHttpSse by remember(state.config.transport) {
-        mutableStateOf(state.config.transport == TransportMode.HttpSse)
-    }
-    var inferenceBaseUrl by remember(state.config.inferenceBaseUrl) {
-        mutableStateOf(state.config.inferenceBaseUrl)
-    }
-    var model by remember(state.config.model) { mutableStateOf(state.config.model) }
     var agentApiBaseUrl by remember(state.config.agentApiBaseUrl) {
         mutableStateOf(state.config.agentApiBaseUrl)
     }
@@ -93,23 +86,13 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(8.dp))
         Text(
-            text = if (useHttpSse) {
-                "Nous Inference HTTP SSE · /v1/chat/completions"
-            } else {
-                "Hermes WebSocket · /v1/ws/chat (local / custom bridge)"
-            },
+            text = "Hermes Agent · WebSocket /v1/ws/chat (модель задаётся на сервере)",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(20.dp))
 
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            SettingToggle(
-                title = "Use Nous Inference (HTTP SSE)",
-                checked = useHttpSse,
-                onCheckedChange = { useHttpSse = it }
-            )
-
             OutlinedTextField(
                 value = apiKey,
                 onValueChange = { apiKey = it },
@@ -160,48 +143,30 @@ fun SettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
-
-            if (useHttpSse) {
-                OutlinedTextField(
-                    value = inferenceBaseUrl,
-                    onValueChange = { inferenceBaseUrl = it },
-                    label = { Text("Inference base URL") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = model,
-                    onValueChange = { model = it },
-                    label = { Text("Model (Inference API; agent uses its own server model)") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-            } else {
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { host = it },
-                    label = { Text("WS Host") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                OutlinedTextField(
-                    value = port,
-                    onValueChange = { port = it.filter { ch -> ch.isDigit() }.take(5) },
-                    label = { Text("WS Port") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-                SettingToggle(
-                    title = "Use WSS (TLS)",
-                    checked = useTls,
-                    onCheckedChange = { useTls = it }
-                )
-                SettingToggle(
-                    title = "Keep alive in background (Foreground Service)",
-                    checked = keepAlive,
-                    onCheckedChange = { keepAlive = it }
-                )
-            }
+            OutlinedTextField(
+                value = host,
+                onValueChange = { host = it },
+                label = { Text("WS Host") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            OutlinedTextField(
+                value = port,
+                onValueChange = { port = it.filter { ch -> ch.isDigit() }.take(5) },
+                label = { Text("WS Port") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            SettingToggle(
+                title = "Use WSS (TLS)",
+                checked = useTls,
+                onCheckedChange = { useTls = it }
+            )
+            SettingToggle(
+                title = "Keep alive in background (Foreground Service)",
+                checked = keepAlive,
+                onCheckedChange = { keepAlive = it }
+            )
         }
 
         Spacer(Modifier.height(24.dp))
@@ -230,10 +195,9 @@ fun SettingsScreen(
                         sessionId = sessionId.trim().ifBlank { HermesConfig.SESSION_ID },
                         useTls = useTls,
                         keepAliveInBackground = keepAlive,
-                        transport = if (useHttpSse) TransportMode.HttpSse else TransportMode.WebSocket,
-                        inferenceBaseUrl = inferenceBaseUrl.trim()
-                            .ifBlank { HermesConfig.INFERENCE_BASE_URL },
-                        model = model.trim().ifBlank { HermesConfig.MODEL },
+                        transport = TransportMode.WebSocket,
+                        model = state.config.model,
+                        inferenceBaseUrl = state.config.inferenceBaseUrl,
                         agentApiBaseUrl = agentApiBaseUrl.trim(),
                         supabaseUrl = supabaseUrl.trim(),
                         supabaseAnonKey = supabaseAnonKey.trim()

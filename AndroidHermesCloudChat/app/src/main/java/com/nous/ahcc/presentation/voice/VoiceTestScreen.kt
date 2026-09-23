@@ -270,30 +270,13 @@ class VoiceTestViewModel(
                         }
                     }
                     "done", "message.complete" -> {
-                        val final = response.content?.takeIf { it.isNotBlank() }
-                        val text = final ?: _state.value.agentReply
-                        val looksHtml = text.contains("<html", ignoreCase = true) ||
-                            text.contains("<!DOCTYPE", ignoreCase = true) ||
-                            (text.contains("<div", ignoreCase = true) && text.length > 2_000)
-                        Log.i(
-                            TAG,
-                            "reply done chars=${text.length} html=$looksHtml " +
-                                "preview=${text.take(160).replace('\n', ' ')}"
-                        )
+                        val text = response.content?.takeIf { it.isNotBlank() } ?: _state.value.agentReply
+                        Log.i(TAG, "reply done chars=${text.length} preview=${text.take(160).replace('\n', ' ')}")
                         _state.update {
                             it.copy(
                                 isSending = false,
-                                status = if (looksHtml) {
-                                    "Done · model returned HTML (${text.length} chars), not a transcript"
-                                } else {
-                                    "Done (${text.length} chars)"
-                                },
-                                agentReply = text,
-                                notice = if (looksHtml) {
-                                    "Модель вернула HTML (~${text.length} симв.), не расшифровку аудио"
-                                } else {
-                                    null
-                                }
+                                status = "Done (${text.length} chars)",
+                                agentReply = text
                             )
                         }
                     }
@@ -419,22 +402,16 @@ class VoiceTestViewModel(
                     durationMs = lastDurationMs,
                     localPath = path
                 )
-                val caption =
-                    "Voice note (audio/mp4, ${lastDurationMs} ms).\n" +
-                        "Transcribe the speech. Reply with ONLY the transcription text — " +
-                        "no preamble, no summary, no questions."
-                val envelope = MediaEnvelopeCodec.buildOutboundText(
-                    caption,
-                    listOf(attachment),
-                    sessionId
-                )
+                val caption = "Голосовое сообщение (${lastDurationMs} ms)"
                 val wires = MediaEnvelopeCodec.wiresOf(listOf(attachment))
-                val placeholder = "[voice] ${attachment.name}"
-                Log.i(TAG, "send ${bytes.size}B envelopeChars=${envelope.length} session=$sessionId")
+                Log.i(
+                    TAG,
+                    "send ${bytes.size}B attachments=${wires.size} captionChars=${caption.length} session=$sessionId"
+                )
                 withContext(Dispatchers.IO) {
                     app.chatGateway.sendMedia(
-                        envelopeText = envelope,
-                        historyPlaceholder = placeholder,
+                        envelopeText = "",
+                        historyPlaceholder = caption,
                         photoJpegBase64 = null,
                         attachmentWires = wires,
                         sessionId = sessionId

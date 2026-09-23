@@ -154,25 +154,39 @@ BASE64...
 
 ## 4. Транспорт WebSocket
 
-Кадр AHCC → Agent (расширение существующего `HermesRequest`):
+Основной транспорт AHCC → Hermes Agent. Бинарные данные идут в корневом `attachments[]` кадра `user_message` (схема элемента — как в §2, `ahcc.media.v1`, без смены версии: поле уже было в контракте). Текстовый блок `<<<AHCC_MEDIA_V1>>>` в `content` **не дублирует** base64.
 
 ```json
 {
   "event": "user_message",
   "session_id": "android_test_session",
-  "content": "Голосовое сообщение",
+  "content": "Голосовое сообщение (4100 ms)",
   "data": {
     "role": "user",
-    "content": "<полный текст с <<<AHCC_MEDIA_V1>>> или чистый caption>"
+    "content": "Голосовое сообщение (4100 ms)"
   },
-  "attachments": [ { "...как в схеме..." } ]
+  "attachments": [
+    {
+      "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "kind": "voice",
+      "mime": "audio/mp4",
+      "name": "voice_20260920_180501.m4a",
+      "size": 48210,
+      "duration_ms": 4100,
+      "encoding": "base64",
+      "data": "AAAA...."
+    }
+  ]
 }
 ```
 
-Поле `attachments` на корне — **опциональное** удобство для native Hermes Agent.  
-Если сервер его игнорирует, достаточно `data.content` / `content` с блоком `AHCC_MEDIA_V1`.
+Поля `model` в кадре нет: модель выбирает Hermes Agent на сервере.
 
-Входящие кадры: `token` / `message` / `done` как раньше; media-блок может прийти внутри `content` / `delta` (на `done` клиент сканирует полный текст ассистента).
+`attachments[]` — основной канал для `voice` / `photo` / `file`. `content` — короткая подпись. Текстовый envelope `AHCC_MEDIA_V1` остаётся fallback для legacy HTTP SSE (класс клиента сохранён, в UI не выбирается).
+
+Входящие кадры: `token` / `message` / `done`. Голосовой ответ агента (`kind=voice`, `direction=agent_to_client`) клиент по-прежнему достаёт из текста кадра парсером `AHCC_MEDIA_V1` / `[AHCC_VOICE]`.
+
+Транскрипция выполняется на стороне агента (например tool `transcribe_audio` по `attachments[]`). Клиент её не делает.
 
 ---
 

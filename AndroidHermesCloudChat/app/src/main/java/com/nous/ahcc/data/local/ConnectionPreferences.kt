@@ -41,7 +41,8 @@ class ConnectionPreferences(private val context: Context) {
             sessionId = prefs[Keys.sessionId] ?: HermesConfig.SESSION_ID,
             useTls = prefs[Keys.useTls] ?: HermesConfig.USE_TLS,
             keepAliveInBackground = prefs[Keys.keepAlive] ?: true,
-            transport = TransportMode.fromStorage(prefs[Keys.transport] ?: HermesConfig.TRANSPORT),
+            // Stored http_sse is ignored: AHCC talks to Hermes Agent over WebSocket only.
+            transport = TransportMode.WebSocket,
             inferenceBaseUrl = prefs[Keys.inferenceBaseUrl] ?: HermesConfig.INFERENCE_BASE_URL,
             model = prefs[Keys.model] ?: HermesConfig.MODEL,
             agentApiBaseUrl = prefs[Keys.agentApiBaseUrl] ?: HermesConfig.AGENT_API_BASE_URL,

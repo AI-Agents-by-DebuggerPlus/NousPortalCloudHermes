@@ -76,15 +76,18 @@ enum class MessageRole {
 }
 
 enum class TransportMode {
-    /** OpenAI-compatible streaming against Nous Inference (works with sk-nous). */
+    /**
+     * Legacy Nous Inference HTTP SSE. Not exposed in the app UI.
+     * Model is client-supplied only on this path (`ConnectionConfig.model`).
+     */
     HttpSse,
-    /** Legacy / local Hermes WebSocket bridge (/v1/ws/chat). */
+    /** Hermes Agent event stream: /v1/ws/chat. Model is chosen on the agent, not by the client. */
     WebSocket;
 
     companion object {
-        fun fromStorage(value: String?): TransportMode = when (value) {
-            "websocket", "ws" -> WebSocket
-            else -> HttpSse
+        fun fromStorage(value: String?): TransportMode = when (value?.lowercase()) {
+            "http_sse", "http" -> HttpSse
+            else -> WebSocket
         }
     }
 
@@ -101,10 +104,11 @@ data class ConnectionConfig(
     val sessionId: String = com.nous.ahcc.config.HermesConfig.SESSION_ID,
     val useTls: Boolean = com.nous.ahcc.config.HermesConfig.USE_TLS,
     val keepAliveInBackground: Boolean = true,
-    val transport: TransportMode = TransportMode.fromStorage(
-        com.nous.ahcc.config.HermesConfig.TRANSPORT
-    ),
+    /** Production default: Hermes Agent over WebSocket. HTTP SSE is legacy-only. */
+    val transport: TransportMode = TransportMode.WebSocket,
+    /** Used only by the unused HTTP SSE client. The agent picks its own model. */
     val inferenceBaseUrl: String = com.nous.ahcc.config.HermesConfig.INFERENCE_BASE_URL,
+    /** Legacy HTTP SSE model id. Not sent on the WebSocket path. */
     val model: String = com.nous.ahcc.config.HermesConfig.MODEL,
     /** Hermes Agent API root for server session history. Empty = auto-detect. */
     val agentApiBaseUrl: String = com.nous.ahcc.config.HermesConfig.AGENT_API_BASE_URL,
