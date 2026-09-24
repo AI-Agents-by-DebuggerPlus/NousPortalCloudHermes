@@ -5,7 +5,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.nous.ahcc.presentation.chat.ChatScreen
+import com.nous.ahcc.presentation.chat.ChatToolLogScreen
 import com.nous.ahcc.presentation.chat.HermesChatViewModel
+import com.nous.ahcc.presentation.chat.TtsVoiceScreen
 import com.nous.ahcc.presentation.settings.SettingsScreen
 
 object Routes {
@@ -13,6 +15,9 @@ object Routes {
     const val Settings = "settings"
     const val BluetoothTest = "bluetooth_test"
     const val VoiceTest = "voice_test"
+    const val TelegramLogin = "telegram_login"
+    const val ToolLog = "tool_log"
+    const val TtsVoices = "tts_voices"
 }
 
 @Composable
@@ -23,7 +28,8 @@ fun AhccNavHost(viewModel: HermesChatViewModel) {
             ChatScreen(
                 viewModel = viewModel,
                 onOpenSettings = { navController.navigate(Routes.Settings) },
-                onOpenBluetoothTest = { navController.navigate(Routes.BluetoothTest) }
+                onOpenBluetoothTest = { navController.navigate(Routes.BluetoothTest) },
+                onOpenToolLog = { navController.navigate(Routes.ToolLog) }
             )
         }
         composable(Routes.Settings) {
@@ -31,7 +37,26 @@ fun AhccNavHost(viewModel: HermesChatViewModel) {
                 viewModel = viewModel,
                 onBack = { navController.popBackStack() },
                 onOpenBluetoothTest = { navController.navigate(Routes.BluetoothTest) },
-                onOpenVoiceTest = { navController.navigate(Routes.VoiceTest) }
+                onOpenVoiceTest = { navController.navigate(Routes.VoiceTest) },
+                onOpenTelegramLogin = { navController.navigate(Routes.TelegramLogin) },
+                onOpenTtsVoices = { navController.navigate(Routes.TtsVoices) }
+            )
+        }
+        composable(Routes.TtsVoices) {
+            TtsVoiceScreen(
+                viewModel = viewModel,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.ToolLog) {
+            ChatToolLogScreen(
+                viewModel = viewModel,
+                onBack = { navController.popBackStack() }
+            )
+        }
+        composable(Routes.TelegramLogin) {
+            com.nous.ahcc.presentation.telegram.TelegramLoginScreen(
+                onBack = { navController.popBackStack() }
             )
         }
         composable(Routes.BluetoothTest) {

@@ -10,6 +10,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -69,6 +70,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -94,7 +96,8 @@ import java.io.File
 fun ChatScreen(
     viewModel: HermesChatViewModel,
     onOpenSettings: () -> Unit,
-    onOpenBluetoothTest: () -> Unit
+    onOpenBluetoothTest: () -> Unit,
+    onOpenToolLog: () -> Unit
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
@@ -158,6 +161,11 @@ fun ChatScreen(
         }
     }
 
+    LaunchedEffect(state.messages.size, state.messages.lastOrNull()?.content) {
+        val last = state.messages.lastIndex
+        if (last >= 0) listState.animateScrollToItem(last)
+    }
+
     LaunchedEffect(state.lastError) {
         val err = state.lastError ?: return@LaunchedEffect
         snackbar.showSnackbar(err)
@@ -187,7 +195,7 @@ fun ChatScreen(
         topBar = {
             ChatTopBar(
                 connectionState = state.connectionState,
-                hostLabel = "WS · ${state.config.host}:${state.config.port}",
+                hostLabel = "Telegram · ${state.config.telegramChatId.ifBlank { "нет chat id" }}",
                 recording = state.isRecording,
                 onToggleConnection = {
                     if (state.connectionState == ConnectionState.Connected ||
@@ -214,7 +222,7 @@ fun ChatScreen(
         ) {
             if (state.isRecording) {
                 Text(
-                    text = "Recording… stop talking → auto-send. Play ignored until reply.",
+                    text = "Recording… press Play again to send.",
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.labelLarge,
                     modifier = Modifier
@@ -268,6 +276,18 @@ fun ChatScreen(
                 },
                 onCamera = { launchCamera() },
                 onMic = { launchMic() }
+            )
+            Text(
+                text = state.toolStatus.ifBlank { "Служебные команды" },
+                color = Color(0xFFE8F4F3),
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFF123D45))
+                    .clickable(onClick = onOpenToolLog)
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
             )
         }
     }
@@ -397,6 +417,7 @@ private fun MessageBubble(
     }
 
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = align) {
+        if (message.content.isBlank() && !message.isStreaming) return@Box
         Column(
             modifier = Modifier
                 .widthIn(max = 340.dp)

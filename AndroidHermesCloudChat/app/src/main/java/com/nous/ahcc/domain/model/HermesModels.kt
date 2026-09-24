@@ -115,5 +115,8 @@ data class ConnectionConfig(
     /** Supabase project URL, e.g. https://xxxx.supabase.co */
     val supabaseUrl: String = com.nous.ahcc.config.HermesConfig.SUPABASE_URL,
     /** Supabase anon (public) key */
-    val supabaseAnonKey: String = com.nous.ahcc.config.HermesConfig.SUPABASE_ANON_KEY
+    val supabaseAnonKey: String = com.nous.ahcc.config.HermesConfig.SUPABASE_ANON_KEY,
+    /** Telegram bot that carries chat and voice. Not the Inference sk-nous key. */
+    val telegramBotToken: String = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_TOKEN,
+    val telegramChatId: String = com.nous.ahcc.config.HermesConfig.TELEGRAM_CHAT_ID
 )

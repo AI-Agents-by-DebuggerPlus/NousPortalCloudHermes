@@ -1,11 +1,12 @@
 package com.nous.ahcc.data
 
 import com.nous.ahcc.data.http.HermesHttpSseClient
+import com.nous.ahcc.data.telegram.TelegramChatTransport
 import com.nous.ahcc.data.websocket.HermesWebSocketManager
 import com.nous.ahcc.domain.model.ConnectionConfig
 import com.nous.ahcc.domain.model.ConnectionState
 import com.nous.ahcc.domain.model.HermesResponse
-import com.nous.ahcc.domain.model.TransportMode
+import com.nous.ahcc.domain.model.MediaAttachmentWire
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,16 +20,16 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * Chat facade. Production path is Hermes Agent WebSocket (push frames only).
- * [HermesHttpSseClient] stays compiled as an unused legacy fallback; the UI cannot select it.
+ * Chat facade. The user-facing path is the Telegram Bot API.
+ * WebSocket and HTTP SSE clients stay compiled and are not started from Connect.
  */
 class HermesChatGateway(
+    private val telegram: TelegramChatTransport = TelegramChatTransport(),
     private val webSocket: HermesWebSocketManager = HermesWebSocketManager(),
     private val httpSse: HermesHttpSseClient = HermesHttpSseClient()
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var collectJobs = mutableListOf<Job>()
-    private var activeMode: TransportMode = TransportMode.WebSocket
 
     private val _connectionState = MutableStateFlow(ConnectionState.Disconnected)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -41,45 +42,33 @@ class HermesChatGateway(
 
     fun connect(config: ConnectionConfig) {
         disconnect(clearHttpHistory = false)
-        // User-facing path is always the agent WebSocket, even if old prefs said HTTP SSE.
-        activeMode = TransportMode.WebSocket
-        wireActiveTransport()
-        webSocket.connect(config.copy(transport = TransportMode.WebSocket))
+        wireTelegram()
+        telegram.connect(config)
     }
 
     suspend fun sendMessage(text: String, sessionId: String? = null) {
-        when (activeMode) {
-            TransportMode.HttpSse -> httpSse.sendMessage(text, sessionId)
-            TransportMode.WebSocket -> webSocket.sendMessage(text, sessionId)
-        }
+        telegram.sendMessage(text)
     }
 
     suspend fun sendMedia(
         envelopeText: String,
         historyPlaceholder: String,
         photoJpegBase64: String?,
-        attachmentWires: List<com.nous.ahcc.domain.model.MediaAttachmentWire>?,
+        attachmentWires: List<MediaAttachmentWire>?,
         sessionId: String? = null
     ) {
-        when (activeMode) {
-            TransportMode.HttpSse -> httpSse.sendMedia(
-                envelopeText = envelopeText,
-                historyPlaceholder = historyPlaceholder,
-                photoJpegBase64 = photoJpegBase64,
-                sessionId = sessionId
-            )
-            TransportMode.WebSocket -> webSocket.sendMediaMessage(
-                // Short caption only. Binary payload is attachments[].data (ahcc.media.v1).
-                text = historyPlaceholder,
-                attachments = attachmentWires,
-                sessionId = sessionId
-            )
+        val wire = attachmentWires?.firstOrNull()
+        if (wire != null) {
+            telegram.sendAttachment(historyPlaceholder, wire)
+        } else if (historyPlaceholder.isNotBlank()) {
+            telegram.sendMessage(historyPlaceholder)
         }
     }
 
     fun disconnect(clearHttpHistory: Boolean = true) {
         collectJobs.forEach { it.cancel() }
         collectJobs.clear()
+        telegram.disconnect()
         webSocket.disconnect()
         if (clearHttpHistory) httpSse.clearHistory()
         httpSse.disconnect()
@@ -90,32 +79,17 @@ class HermesChatGateway(
         httpSse.clearHistory()
     }
 
-    private fun wireActiveTransport() {
+    private fun wireTelegram() {
         collectJobs.forEach { it.cancel() }
         collectJobs.clear()
-        when (activeMode) {
-            TransportMode.HttpSse -> {
-                collectJobs += scope.launch {
-                    httpSse.connectionState.collect { _connectionState.value = it }
-                }
-                collectJobs += scope.launch {
-                    httpSse.lastError.collect { _lastError.value = it }
-                }
-                collectJobs += scope.launch {
-                    httpSse.responses.collect { _responses.emit(it) }
-                }
-            }
-            TransportMode.WebSocket -> {
-                collectJobs += scope.launch {
-                    webSocket.connectionState.collect { _connectionState.value = it }
-                }
-                collectJobs += scope.launch {
-                    webSocket.lastError.collect { _lastError.value = it }
-                }
-                collectJobs += scope.launch {
-                    webSocket.responses.collect { _responses.emit(it) }
-                }
-            }
+        collectJobs += scope.launch {
+            telegram.connectionState.collect { _connectionState.value = it }
+        }
+        collectJobs += scope.launch {
+            telegram.lastError.collect { _lastError.value = it }
+        }
+        collectJobs += scope.launch {
+            telegram.responses.collect { _responses.emit(it) }
         }
     }
 }

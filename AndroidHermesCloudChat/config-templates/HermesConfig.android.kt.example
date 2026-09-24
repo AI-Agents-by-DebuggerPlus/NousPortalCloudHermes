@@ -17,6 +17,14 @@ object HermesConfig {
     const val MODEL = "z-ai/glm-4.5-air"
     const val TRANSPORT = "websocket"
 
+    /** Voice path: user session to the Hermes bot. Leave empty and fill in the app. */
+    const val TELEGRAM_BOT_TOKEN = ""
+    const val TELEGRAM_CHAT_ID = ""
+    const val TELEGRAM_BOT_USERNAME = ""
+    const val TELEGRAM_API_ID = 0
+    const val TELEGRAM_API_HASH = ""
+    const val TELEGRAM_PHONE = ""
+
     fun getWebSocketUrl(sessionId: String = SESSION_ID): String {
         return "wss://$HOST/v1/ws/chat?session_id=$sessionId"
     }

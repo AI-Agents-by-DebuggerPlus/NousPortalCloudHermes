@@ -25,6 +25,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -37,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
@@ -47,10 +50,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nous.ahcc.AhccApp
-import com.nous.ahcc.domain.model.ChatAttachment
-import com.nous.ahcc.domain.model.ConnectionState
-import com.nous.ahcc.domain.model.MediaKind
-import com.nous.ahcc.media.MediaEnvelopeCodec
 import com.nous.ahcc.media.VoicePlayer
 import com.nous.ahcc.media.VoiceRecorder
 import kotlinx.coroutines.Dispatchers
@@ -61,9 +60,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 data class VoiceTestUiState(
-    val connectionState: ConnectionState = ConnectionState.Disconnected,
+    val botToken: String = "",
+    val chatId: String = "",
     val isRecording: Boolean = false,
     val hasRecording: Boolean = false,
     val isPlaying: Boolean = false,
@@ -148,19 +149,43 @@ fun VoiceTestScreen(onBack: () -> Unit) {
         }
 
         Text(
-            text = "1) Start/Stop запись  2) Play  3) Send → ответ агента ниже.\n" +
-                "Нужен Connect в чате (Inference).",
+            text = "1) Start/Stop запись  2) Play  3) Send — файл уходит в чат бота от вашего аккаунта. Ответ дописывается, пока Hermes пишет.",
             color = Color(0xFF8AA8A6),
             style = MaterialTheme.typography.bodySmall
         )
 
+        val fieldColors = OutlinedTextFieldDefaults.colors(
+            focusedTextColor = Color(0xFFE8F4F3),
+            unfocusedTextColor = Color(0xFFE8F4F3),
+            focusedBorderColor = Color(0xFF1FA6A0),
+            unfocusedBorderColor = Color(0xFF3A6A72),
+            cursorColor = Color(0xFFE8F4F3),
+            focusedLabelColor = Color(0xFF8AA8A6),
+            unfocusedLabelColor = Color(0xFF8AA8A6),
+            focusedContainerColor = Color(0xFF123D45),
+            unfocusedContainerColor = Color(0xFF123D45)
+        )
+        OutlinedTextField(
+            value = state.botToken,
+            onValueChange = vm::onBotToken,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Bot token") },
+            visualTransformation = PasswordVisualTransformation(),
+            colors = fieldColors
+        )
+        OutlinedTextField(
+            value = state.chatId,
+            onValueChange = vm::onChatId,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text("Chat id") },
+            colors = fieldColors
+        )
+
         Text(
-            text = "Связь: ${state.connectionState} · ${state.status}",
-            color = if (state.connectionState == ConnectionState.Connected) {
-                Color(0xFF4CAF50)
-            } else {
-                Color(0xFFEF5350)
-            },
+            text = state.status,
+            color = Color(0xFFE8F4F3),
             style = MaterialTheme.typography.bodyMedium
         )
 
@@ -202,14 +227,15 @@ fun VoiceTestScreen(onBack: () -> Unit) {
             enabled = state.hasRecording &&
                 !state.isRecording &&
                 !state.isSending &&
-                state.connectionState == ConnectionState.Connected,
+                state.botToken.isNotBlank() &&
+                state.chatId.isNotBlank(),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(if (state.isSending) "Sending…" else "Send to Hermes Cloud")
+            Text(if (state.isSending) "Sending…" else "Send via Telegram")
         }
 
         Text(
-            text = "Ответ агента",
+            text = "Результат отправки",
             color = Color(0xFF8AA8A6),
             style = MaterialTheme.typography.labelLarge
         )
@@ -248,63 +274,29 @@ class VoiceTestViewModel(
     private var lastBytes: ByteArray? = null
     private var lastPath: String? = null
     private var lastDurationMs: Long = 0L
-    private var lastName: String = ""
-    private var lastId: String = ""
+    private val keepDir = File(application.filesDir, "voice-test").apply { mkdirs() }
+    private val keepFile = File(keepDir, "last.m4a")
+    private val metaFile = File(keepDir, "last.txt")
 
     private val _state = MutableStateFlow(VoiceTestUiState())
     val state: StateFlow<VoiceTestUiState> = _state.asStateFlow()
 
     init {
         viewModelScope.launch {
-            app.chatGateway.connectionState.collect { cs ->
-                _state.update { it.copy(connectionState = cs) }
-            }
+            val saved = app.preferences.telegramTargetFlow.first()
+            _state.update { it.copy(botToken = saved.botToken, chatId = saved.chatId) }
+            restoreKeptRecording()
         }
-        viewModelScope.launch {
-            app.chatGateway.responses.collect { response ->
-                when (response.event) {
-                    "token", "message.delta" -> {
-                        val delta = response.delta ?: response.content.orEmpty()
-                        if (delta.isNotEmpty()) {
-                            _state.update { it.copy(agentReply = it.agentReply + delta) }
-                        }
-                    }
-                    "done", "message.complete" -> {
-                        val text = response.content?.takeIf { it.isNotBlank() } ?: _state.value.agentReply
-                        Log.i(TAG, "reply done chars=${text.length} preview=${text.take(160).replace('\n', ' ')}")
-                        _state.update {
-                            it.copy(
-                                isSending = false,
-                                status = "Done (${text.length} chars)",
-                                agentReply = text
-                            )
-                        }
-                    }
-                    "error" -> {
-                        _state.update {
-                            it.copy(
-                                isSending = false,
-                                status = "Error",
-                                error = response.error ?: "Agent error"
-                            )
-                        }
-                    }
-                    "message" -> {
-                        val content = response.content
-                            ?: response.data?.content
-                            ?: response.delta
-                            ?: return@collect
-                        _state.update {
-                            it.copy(
-                                isSending = false,
-                                status = "Done",
-                                agentReply = content
-                            )
-                        }
-                    }
-                }
-            }
-        }
+    }
+
+    fun onBotToken(value: String) {
+        _state.update { it.copy(botToken = value) }
+        viewModelScope.launch { app.preferences.saveTelegram(value, _state.value.chatId) }
+    }
+
+    fun onChatId(value: String) {
+        _state.update { it.copy(chatId = value) }
+        viewModelScope.launch { app.preferences.saveTelegram(_state.value.botToken, value) }
     }
 
     fun startRecording() {
@@ -312,8 +304,6 @@ class VoiceTestViewModel(
         player.stop()
         runCatching {
             recorder.start()
-            lastBytes = null
-            lastPath = null
             _state.update {
                 it.copy(
                     isRecording = true,
@@ -334,28 +324,55 @@ class VoiceTestViewModel(
         if (!_state.value.isRecording) return
         val result = recorder.stop()
         if (result == null) {
-            _state.update {
-                it.copy(isRecording = false, hasRecording = false, status = "Too short")
-            }
+            restoreKeptRecording(fallbackStatus = "Too short")
             setError("Запись слишком короткая")
             return
         }
-        lastBytes = result.bytes
-        lastPath = result.file.absolutePath
-        lastDurationMs = result.durationMs
-        lastName = result.file.name
-        lastId = result.id
+        keepFile.writeBytes(result.bytes)
+        metaFile.writeText("${result.durationMs}\n${result.file.name}")
+        applyRecording(
+            bytes = result.bytes,
+            path = keepFile.absolutePath,
+            durationMs = result.durationMs,
+            name = result.file.name,
+            status = "Recorded"
+        )
+        Log.i(TAG, "kept ${result.file.name} ${result.bytes.size}B")
+    }
+
+    private fun restoreKeptRecording(fallbackStatus: String = "Saved") {
+        if (!keepFile.exists() || keepFile.length() <= 0L) {
+            _state.update { it.copy(isRecording = false, hasRecording = false, status = fallbackStatus) }
+            return
+        }
+        val lines = metaFile.takeIf { it.exists() }?.readLines().orEmpty()
+        val duration = lines.getOrNull(0)?.toLongOrNull() ?: 0L
+        val name = lines.getOrNull(1)?.ifBlank { keepFile.name } ?: keepFile.name
+        val bytes = keepFile.readBytes()
+        applyRecording(bytes, keepFile.absolutePath, duration, name, fallbackStatus)
+        Log.i(TAG, "restored $name ${bytes.size}B")
+    }
+
+    private fun applyRecording(
+        bytes: ByteArray,
+        path: String,
+        durationMs: Long,
+        name: String,
+        status: String,
+    ) {
+        lastBytes = bytes
+        lastPath = path
+        lastDurationMs = durationMs
         _state.update {
             it.copy(
                 isRecording = false,
                 hasRecording = true,
-                fileName = result.file.name,
-                durationMs = result.durationMs,
-                byteSize = result.bytes.size,
-                status = "Recorded"
+                fileName = name,
+                durationMs = durationMs,
+                byteSize = bytes.size,
+                status = status
             )
         }
-        Log.i(TAG, "stopped ${result.file.name} ${result.bytes.size}B")
     }
 
     fun playOrStop() {
@@ -378,47 +395,46 @@ class VoiceTestViewModel(
             setError("Нет записи — сначала Start/Stop")
             return
         }
-        if (_state.value.connectionState != ConnectionState.Connected) {
-            setError("Сначала Connect в чате")
+        if (_state.value.botToken.isBlank() || _state.value.chatId.isBlank()) {
+            setError("Укажите bot token и chat id")
             return
         }
         if (_state.value.isSending) return
-        sendInternal(bytes, path)
+        sendInternal(bytes)
     }
 
-    private fun sendInternal(bytes: ByteArray, path: String) {
+    private fun sendInternal(bytes: ByteArray) {
         viewModelScope.launch {
             try {
                 _state.update {
                     it.copy(isSending = true, agentReply = "", status = "Sending…", notice = null)
                 }
-                val sessionId = app.preferences.configFlow.first().sessionId
-                val attachment = ChatAttachment(
-                    id = lastId.ifBlank { java.util.UUID.randomUUID().toString() },
-                    kind = MediaKind.Voice,
-                    mime = VoiceRecorder.MIME,
-                    name = lastName.ifBlank { "voice.m4a" },
-                    bytes = bytes,
-                    durationMs = lastDurationMs,
-                    localPath = path
-                )
-                val caption = "Голосовое сообщение (${lastDurationMs} ms)"
-                val wires = MediaEnvelopeCodec.wiresOf(listOf(attachment))
-                Log.i(
-                    TAG,
-                    "send ${bytes.size}B attachments=${wires.size} captionChars=${caption.length} session=$sessionId"
-                )
-                withContext(Dispatchers.IO) {
-                    app.chatGateway.sendMedia(
-                        envelopeText = "",
-                        historyPlaceholder = caption,
-                        photoJpegBase64 = null,
-                        attachmentWires = wires,
-                        sessionId = sessionId
-                    )
+                val path = lastPath ?: error("Нет файла записи")
+                if (!app.telegramUser.isReady) {
+                    error("Войдите в Telegram как пользователь: Настройки")
                 }
+                val caption = "Голосовое сообщение (${lastDurationMs} ms)"
+                Log.i(TAG, "user voice ${bytes.size}B captionChars=${caption.length}")
+                val reply = withContext(Dispatchers.IO) {
+                    app.telegramUser.sendAudioAndWaitReply(
+                        path = path,
+                        durationMs = lastDurationMs,
+                        botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME,
+                        caption = caption
+                    ) { partial ->
+                        _state.update {
+                            it.copy(agentReply = partial, status = "Reply…", isSending = true)
+                        }
+                    }
+                }
+                Log.i(TAG, "reply chars=${reply.length}")
                 _state.update {
-                    it.copy(notice = "Аудиофайл отправлен", status = "Sent, waiting reply…")
+                    it.copy(
+                        isSending = false,
+                        notice = "Ответ Hermes получен",
+                        status = "Reply",
+                        agentReply = reply
+                    )
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "send failed: ${e.message}", e)

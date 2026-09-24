@@ -13,10 +13,13 @@ android {
         applicationId = "com.nous.ahcc"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.3.0"
+        versionCode = 31
+        versionName = "1.4.12"
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "VERSION_LABEL", "\"1.3.0 (13)\"")
+        buildConfigField("String", "VERSION_LABEL", "\"1.4.12 (31)\"")
     }
 
     buildTypes {
@@ -76,6 +79,7 @@ dependencies {
     implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.12")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("io.github.tdlib-android:core:0.1.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

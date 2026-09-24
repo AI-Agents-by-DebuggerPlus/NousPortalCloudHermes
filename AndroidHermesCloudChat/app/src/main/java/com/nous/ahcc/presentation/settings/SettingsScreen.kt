@@ -44,7 +44,9 @@ fun SettingsScreen(
     viewModel: HermesChatViewModel,
     onBack: () -> Unit,
     onOpenBluetoothTest: () -> Unit = {},
-    onOpenVoiceTest: () -> Unit = {}
+    onOpenVoiceTest: () -> Unit = {},
+    onOpenTelegramLogin: () -> Unit = {},
+    onOpenTtsVoices: () -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var host by remember(state.config.host) { mutableStateOf(state.config.host) }
@@ -86,7 +88,7 @@ fun SettingsScreen(
 
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "Hermes Agent · WebSocket /v1/ws/chat (модель задаётся на сервере)",
+            text = "Чат идёт через Telegram Bot API (getMe / sendMessage / sendAudio).",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -178,6 +180,20 @@ fun SettingsScreen(
         }
         Spacer(Modifier.height(12.dp))
         OutlinedButton(
+            onClick = onOpenTelegramLogin,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Вход в Telegram (пользователь)")
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
+            onClick = onOpenTtsVoices,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Голоса озвучки")
+        }
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
             onClick = onOpenVoiceTest,
             modifier = Modifier.fillMaxWidth()
         ) {
@@ -200,7 +216,9 @@ fun SettingsScreen(
                         inferenceBaseUrl = state.config.inferenceBaseUrl,
                         agentApiBaseUrl = agentApiBaseUrl.trim(),
                         supabaseUrl = supabaseUrl.trim(),
-                        supabaseAnonKey = supabaseAnonKey.trim()
+                        supabaseAnonKey = supabaseAnonKey.trim(),
+                        telegramBotToken = state.config.telegramBotToken,
+                        telegramChatId = state.config.telegramChatId
                     )
                 )
                 onBack()

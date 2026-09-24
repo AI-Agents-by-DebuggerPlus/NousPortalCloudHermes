@@ -31,6 +31,64 @@ class ConnectionPreferences(private val context: Context) {
         val agentApiBaseUrl = stringPreferencesKey("agent_api_base_url")
         val supabaseUrl = stringPreferencesKey("supabase_url")
         val supabaseAnonKey = stringPreferencesKey("supabase_anon_key")
+        val telegramBotToken = stringPreferencesKey("telegram_bot_token_v2")
+        val telegramChatId = stringPreferencesKey("telegram_chat_id")
+        val telegramApiId = intPreferencesKey("telegram_api_id")
+        val telegramApiHash = stringPreferencesKey("telegram_api_hash")
+        val telegramPhone = stringPreferencesKey("telegram_phone")
+        val ttsEnglishVoice = stringPreferencesKey("tts_english_voice")
+        val ttsRussianVoice = stringPreferencesKey("tts_russian_voice")
+    }
+
+    data class TelegramTarget(val botToken: String, val chatId: String)
+
+    val telegramTargetFlow: Flow<TelegramTarget> = context.dataStore.data.map { prefs ->
+        TelegramTarget(
+            botToken = prefs[Keys.telegramBotToken] ?: HermesConfig.TELEGRAM_BOT_TOKEN,
+            chatId = prefs[Keys.telegramChatId] ?: HermesConfig.TELEGRAM_CHAT_ID
+        )
+    }
+
+    data class TtsVoices(val english: String, val russian: String)
+
+    val ttsVoiceFlow: Flow<TtsVoices> = context.dataStore.data.map { prefs ->
+        TtsVoices(
+            english = prefs[Keys.ttsEnglishVoice].orEmpty(),
+            russian = prefs[Keys.ttsRussianVoice].orEmpty(),
+        )
+    }
+
+    suspend fun saveTtsVoices(english: String, russian: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.ttsEnglishVoice] = english.trim()
+            prefs[Keys.ttsRussianVoice] = russian.trim()
+        }
+    }
+
+    data class TelegramLogin(val apiId: Int, val apiHash: String, val phone: String)
+
+    val telegramLoginFlow: Flow<TelegramLogin> = context.dataStore.data.map { prefs ->
+        TelegramLogin(
+            apiId = prefs[Keys.telegramApiId]?.takeIf { it != 0 } ?: HermesConfig.TELEGRAM_API_ID,
+            apiHash = prefs[Keys.telegramApiHash]?.takeIf { it.isNotBlank() }
+                ?: HermesConfig.TELEGRAM_API_HASH,
+            phone = prefs[Keys.telegramPhone]?.takeIf { it.isNotBlank() } ?: HermesConfig.TELEGRAM_PHONE
+        )
+    }
+
+    suspend fun saveTelegramLogin(apiId: Int, apiHash: String, phone: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.telegramApiId] = apiId
+            prefs[Keys.telegramApiHash] = apiHash.trim()
+            prefs[Keys.telegramPhone] = phone.trim()
+        }
+    }
+
+    suspend fun saveTelegram(botToken: String, chatId: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.telegramBotToken] = botToken.trim()
+            prefs[Keys.telegramChatId] = chatId.trim()
+        }
     }
 
     val configFlow: Flow<ConnectionConfig> = context.dataStore.data.map { prefs ->
@@ -49,7 +107,11 @@ class ConnectionPreferences(private val context: Context) {
             supabaseUrl = (prefs[Keys.supabaseUrl] ?: HermesConfig.SUPABASE_URL)
                 .ifBlank { HermesConfig.SUPABASE_URL },
             supabaseAnonKey = (prefs[Keys.supabaseAnonKey] ?: HermesConfig.SUPABASE_ANON_KEY)
-                .ifBlank { HermesConfig.SUPABASE_ANON_KEY }
+                .ifBlank { HermesConfig.SUPABASE_ANON_KEY },
+            telegramBotToken = (prefs[Keys.telegramBotToken] ?: HermesConfig.TELEGRAM_BOT_TOKEN)
+                .ifBlank { HermesConfig.TELEGRAM_BOT_TOKEN },
+            telegramChatId = (prefs[Keys.telegramChatId] ?: HermesConfig.TELEGRAM_CHAT_ID)
+                .ifBlank { HermesConfig.TELEGRAM_CHAT_ID }
         )
     }
 
@@ -68,6 +130,8 @@ class ConnectionPreferences(private val context: Context) {
             prefs[Keys.agentApiBaseUrl] = config.agentApiBaseUrl.trim()
             prefs[Keys.supabaseUrl] = config.supabaseUrl.trim()
             prefs[Keys.supabaseAnonKey] = config.supabaseAnonKey.trim()
+            prefs[Keys.telegramBotToken] = config.telegramBotToken.trim()
+            prefs[Keys.telegramChatId] = config.telegramChatId.trim()
         }
     }
 }
