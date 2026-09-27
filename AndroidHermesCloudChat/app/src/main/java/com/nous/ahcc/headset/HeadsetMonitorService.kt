@@ -34,7 +34,18 @@ import java.util.concurrent.Executors
 class HeadsetMonitorService : Service() {
     private var mediaSession: MediaSessionCompat? = null
     private var audioFocusRequest: AudioFocusRequest? = null
+    private var reclaimPosted = false
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { focus ->
+        Log.i(TAG, "AudioFocus change=$focus")
+        if (focus != AudioManager.AUDIOFOCUS_LOSS || reclaimPosted) return@OnAudioFocusChangeListener
+        reclaimPosted = true
+        mainHandler.postDelayed({
+            reclaimPosted = false
+            requestAudioFocus()
+            refreshClaimPlaybackState()
+        }, 400)
+    }
     private val pulseExecutor = Executors.newSingleThreadExecutor()
 
     override fun onCreate() {
@@ -194,16 +205,18 @@ class HeadsetMonitorService : Service() {
     private fun requestAudioFocus() {
         val am = getSystemService(AudioManager::class.java) ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+            val existing = audioFocusRequest
+            val req = existing ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
-                .setOnAudioFocusChangeListener { }
+                .setAcceptsDelayedFocusGain(true)
+                .setOnAudioFocusChangeListener(focusListener, mainHandler)
                 .build()
-            audioFocusRequest = req
+                .also { audioFocusRequest = it }
             val result = am.requestAudioFocus(req)
             Log.i(TAG, "AudioFocus result=$result")
         } else {

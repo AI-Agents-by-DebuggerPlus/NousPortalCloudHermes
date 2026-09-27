@@ -47,6 +47,16 @@ class AhccSupabaseClient(
         return rows.firstOrNull()?.sessionId?.takeIf { it.isNotBlank() }
     }
 
+    suspend fun fetchRecentMessages(limit: Int = 12): List<AhccMessageRow> {
+        if (!isConfigured) return emptyList()
+        return http.get("$root/rest/v1/ahcc_messages") {
+            authHeaders()
+            url.parameters.append("select", "created_at,sender_name,content")
+            url.parameters.append("order", "created_at.desc")
+            url.parameters.append("limit", limit.toString())
+        }.body()
+    }
+
     suspend fun fetchSessionMessages(sessionId: String): List<AhccMessageRow> {
         if (!isConfigured || sessionId.isBlank()) return emptyList()
         return http.get("$root/rest/v1/ahcc_messages") {

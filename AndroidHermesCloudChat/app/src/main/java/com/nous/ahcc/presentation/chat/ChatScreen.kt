@@ -1,11 +1,20 @@
 package com.nous.ahcc.presentation.chat
 
+import android.app.Activity
 import android.Manifest
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -44,6 +53,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -61,6 +71,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -69,8 +80,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isShiftPressed
@@ -78,6 +91,9 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -103,6 +119,15 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val snackbar = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        viewModel.claimHeadsetButtons()
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.claimHeadsetButtons()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     var pendingPhoto by remember { mutableStateOf<File?>(null) }
 
@@ -209,7 +234,11 @@ fun ChatScreen(
                 onOpenSettings = onOpenSettings,
                 onOpenBluetoothTest = onOpenBluetoothTest,
                 onClear = viewModel::clearChat,
-                onNewSession = viewModel::newSession
+                onNewSession = viewModel::newSession,
+                onShutdown = {
+                    val activity = context as? Activity
+                    viewModel.shutdownApp { activity?.finishAndRemoveTask() }
+                }
             )
         }
     ) { padding ->
@@ -220,48 +249,38 @@ fun ChatScreen(
                 .imePadding()
                 .navigationBarsPadding()
         ) {
-            if (state.isRecording) {
-                Text(
-                    text = "Recording… press Play again to send.",
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                )
-            } else if (state.isSending) {
-                Text(
-                    text = "Waiting for transcription… Play ignored.",
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                )
+            if (state.isSending && !state.isRecording) {
+                TypingBanner()
             }
-            if (state.messages.isEmpty()) {
-                EmptyHero(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp)
-                )
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    items(state.messages, key = { it.id }) { message ->
-                        MessageBubble(
-                            message = message,
-                            playingPath = state.playingPath,
-                            onPlayVoice = viewModel::playInbound
-                        )
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+            ) {
+                if (state.messages.isEmpty()) {
+                    EmptyHero(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 24.dp)
+                    )
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(state.messages, key = { it.id }) { message ->
+                            MessageBubble(
+                                message = message,
+                                playingPath = state.playingPath,
+                                onPlayVoice = viewModel::playInbound
+                            )
+                        }
                     }
+                }
+                if (state.isRecording) {
+                    ListeningOrb(Modifier.fillMaxSize())
                 }
             }
 
@@ -294,6 +313,72 @@ fun ChatScreen(
 }
 
 @Composable
+private fun ListeningOrb(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "listen")
+    val spin by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(4800, easing = LinearEasing)),
+        label = "spin",
+    )
+    val pulse by transition.animateFloat(
+        initialValue = 0.88f,
+        targetValue = 1.1f,
+        animationSpec = infiniteRepeatable(
+            tween(1400, easing = FastOutSlowInEasing),
+            RepeatMode.Reverse,
+        ),
+        label = "pulse",
+    )
+    Box(
+        modifier = modifier.background(Color(0xFF0B1F2A)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(
+            Modifier
+                .size(240.dp)
+                .graphicsLayer {
+                    rotationZ = spin
+                    scaleX = pulse
+                    scaleY = pulse
+                }
+        ) {
+            val c = center
+            val r = size.minDimension
+            drawCircle(
+                color = Color(0xFF4C6FFF),
+                radius = r * 0.34f,
+                center = c + Offset(-r * 0.08f, -r * 0.04f),
+                alpha = 0.9f,
+            )
+            drawCircle(
+                color = Color(0xFF2EE6D6),
+                radius = r * 0.28f,
+                center = c + Offset(r * 0.1f, r * 0.02f),
+                alpha = 0.8f,
+            )
+            drawCircle(
+                color = Color(0xFFB388FF),
+                radius = r * 0.22f,
+                center = c + Offset(r * 0.01f, r * 0.12f),
+                alpha = 0.75f,
+            )
+            drawCircle(
+                color = Color(0xFFE8F4F3),
+                radius = r * 0.07f,
+                center = c,
+                alpha = 0.35f,
+            )
+        }
+        Text(
+            text = "Слушаю",
+            color = Color(0xFFE8F4F3),
+            style = MaterialTheme.typography.headlineSmall,
+        )
+    }
+}
+
+@Composable
 private fun ChatTopBar(
     connectionState: ConnectionState,
     hostLabel: String,
@@ -303,6 +388,7 @@ private fun ChatTopBar(
     onOpenBluetoothTest: () -> Unit,
     onClear: () -> Unit,
     onNewSession: () -> Unit,
+    onShutdown: () -> Unit,
 ) {
     val statusColor = when {
         recording -> MaterialTheme.colorScheme.error
@@ -341,6 +427,13 @@ private fun ChatTopBar(
                     overflow = TextOverflow.Ellipsis
                 )
             }
+        }
+        IconButton(onClick = onShutdown) {
+            Icon(
+                imageVector = Icons.Default.PowerSettingsNew,
+                contentDescription = "Выключить",
+                tint = MaterialTheme.colorScheme.onBackground
+            )
         }
         TextButton(onClick = onClear) {
             Text("Clear", color = MaterialTheme.colorScheme.onBackground)
@@ -398,6 +491,48 @@ private fun EmptyHero(modifier: Modifier = Modifier) {
 }
 
 @Composable
+private fun TypingBanner() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "Hermes печатает",
+            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.labelLarge
+        )
+        TypingDots(color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Composable
+private fun TypingDots(color: Color) {
+    val transition = rememberInfiniteTransition(label = "typing")
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+        repeat(3) { index ->
+            val alpha by transition.animateFloat(
+                initialValue = 0.25f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 700, delayMillis = index * 160),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "dot$index"
+            )
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(color.copy(alpha = alpha))
+            )
+        }
+    }
+}
+
+@Composable
 private fun MessageBubble(
     message: ChatMessage,
     playingPath: String?,
@@ -428,7 +563,7 @@ private fun MessageBubble(
             Text(
                 text = when (message.role) {
                     MessageRole.User -> "You"
-                    MessageRole.Assistant -> if (message.isStreaming) "Hermes В· streaming" else "Hermes"
+                    MessageRole.Assistant -> if (message.isStreaming) "Hermes · печатает" else "Hermes"
                     MessageRole.Tool -> "Tool В· ${message.toolName ?: "?"}"
                     MessageRole.System -> "System"
                 },
@@ -436,11 +571,15 @@ private fun MessageBubble(
                 color = fg.copy(alpha = 0.7f)
             )
             Spacer(Modifier.height(4.dp))
-            Text(
-                text = message.content.ifBlank { "..." },
-                style = MaterialTheme.typography.bodyLarge,
-                color = fg
-            )
+            if (message.isStreaming && message.content.isBlank()) {
+                TypingDots(color = fg)
+            } else {
+                Text(
+                    text = message.content,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = fg
+                )
+            }
             val voicePath = message.localMediaPath
                 ?: message.inboundMedia.firstOrNull { it.kind == MediaKind.Voice }?.filePath
             if (voicePath != null) {

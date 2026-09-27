@@ -17,6 +17,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import com.nous.ahcc.config.HermesConfig
 import com.nous.ahcc.domain.model.AgentReplyParts
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
@@ -50,8 +51,11 @@ class TelegramUserSession(context: Context) {
     private val replyLock = Any()
     private val replyParts = linkedMapOf<Long, String>()
     private val outgoingIds = mutableSetOf<Long>()
+    private val idleFlashcardIds = mutableSetOf<Long>()
     @Volatile private var replyWaiter: CompletableDeferred<String>? = null
     @Volatile private var onReply: ((String) -> Unit)? = null
+    /** Incoming bot messages that arrive after AHCC stopped waiting, such as a later flashcard. */
+    @Volatile var onIdleMessage: ((String) -> Unit)? = null
     private var quietJob: Job? = null
 
     var apiId: Int = 0
@@ -188,6 +192,10 @@ class TelegramUserSession(context: Context) {
             is TdApi.AuthorizationStateReady -> {
                 Log.i(TAG, "user session ready")
                 _auth.value = TelegramUserAuth.Ready
+                sessionScope.launch {
+                    runCatching { ensureBotChat(HermesConfig.TELEGRAM_BOT_USERNAME) }
+                        .onFailure { Log.w(TAG, "bot chat resolve failed: ${it.message}") }
+                }
             }
             is TdApi.AuthorizationStateClosed ->
                 _auth.value = TelegramUserAuth.Failed("Сеанс Telegram закрыт")
@@ -247,7 +255,15 @@ class TelegramUserSession(context: Context) {
         if (synchronized(replyLock) { messageId in outgoingIds }) return
         val text = raw?.trim().orEmpty()
         if (text.isEmpty() || AgentReplyParts.isOwnEcho(text)) return
-        val waiter = replyWaiter ?: return
+        val waiter = replyWaiter
+        if (waiter == null) {
+            if (!AgentReplyParts.isFlashcardRelay(text)) return
+            val fresh = synchronized(replyLock) { idleFlashcardIds.add(messageId) }
+            if (!fresh) return
+            Log.i(TAG, "idle flashcard chars=${text.length}")
+            onIdleMessage?.invoke(text)
+            return
+        }
         val shown = synchronized(replyLock) {
             replyParts[messageId] = text
             visibleReply()

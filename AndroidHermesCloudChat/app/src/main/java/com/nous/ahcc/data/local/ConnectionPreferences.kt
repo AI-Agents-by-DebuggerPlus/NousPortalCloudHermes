@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.nous.ahcc.config.HermesConfig
 import com.nous.ahcc.domain.model.ConnectionConfig
@@ -38,6 +39,8 @@ class ConnectionPreferences(private val context: Context) {
         val telegramPhone = stringPreferencesKey("telegram_phone")
         val ttsEnglishVoice = stringPreferencesKey("tts_english_voice")
         val ttsRussianVoice = stringPreferencesKey("tts_russian_voice")
+        val ttsFavoriteVoices = stringSetPreferencesKey("tts_favorite_voices")
+        val localTranscription = booleanPreferencesKey("local_transcription")
     }
 
     data class TelegramTarget(val botToken: String, val chatId: String)
@@ -56,6 +59,26 @@ class ConnectionPreferences(private val context: Context) {
             english = prefs[Keys.ttsEnglishVoice].orEmpty(),
             russian = prefs[Keys.ttsRussianVoice].orEmpty(),
         )
+    }
+
+    val localTranscriptionFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[Keys.localTranscription] ?: false
+    }
+
+    suspend fun saveLocalTranscription(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.localTranscription] = enabled
+        }
+    }
+
+    val ttsFavoritesFlow: Flow<Set<String>> = context.dataStore.data.map { prefs ->
+        prefs[Keys.ttsFavoriteVoices] ?: emptySet()
+    }
+
+    suspend fun saveTtsFavorites(names: Set<String>) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.ttsFavoriteVoices] = names
+        }
     }
 
     suspend fun saveTtsVoices(english: String, russian: String) {

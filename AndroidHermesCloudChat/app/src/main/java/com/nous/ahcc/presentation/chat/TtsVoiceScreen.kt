@@ -15,6 +15,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -79,25 +81,48 @@ fun TtsVoiceScreen(
         ) {
             Text("Установить голосовые данные", color = Color(0xFFE8F4F3))
         }
+        ActiveVoiceLine(
+            title = "Активный английский",
+            voice = state.ttsVoices.firstOrNull { it.name == state.ttsEnglishVoice },
+        )
+        ActiveVoiceLine(
+            title = "Активный русский",
+            voice = state.ttsVoices.firstOrNull { it.name == state.ttsRussianVoice },
+        )
         VoiceSection(
             title = "Английский",
-            voices = state.ttsVoices.filter { it.language == "en" },
+            voices = state.ttsVoices.filter { it.language == "en" }
+                .sortedByDescending { it.name in state.ttsFavoriteVoices },
             selectedName = state.ttsEnglishVoice,
+            favorites = state.ttsFavoriteVoices,
             colors = field,
             selectedColors = selected,
             onSelect = viewModel::selectTtsVoice,
             onPreview = viewModel::previewTtsVoice,
+            onFavorite = viewModel::toggleTtsFavorite,
         )
         VoiceSection(
             title = "Русский",
-            voices = state.ttsVoices.filter { it.language == "ru" },
+            voices = state.ttsVoices.filter { it.language == "ru" }
+                .sortedByDescending { it.name in state.ttsFavoriteVoices },
             selectedName = state.ttsRussianVoice,
+            favorites = state.ttsFavoriteVoices,
             colors = field,
             selectedColors = selected,
             onSelect = viewModel::selectTtsVoice,
             onPreview = viewModel::previewTtsVoice,
+            onFavorite = viewModel::toggleTtsFavorite,
         )
     }
+}
+
+@Composable
+private fun ActiveVoiceLine(title: String, voice: TtsVoiceChoice?) {
+    Text(
+        text = if (voice == null) "$title: не выбран" else "$title: ${voice.label}",
+        color = Color(0xFF1FA6A0),
+        style = MaterialTheme.typography.titleSmall,
+    )
 }
 
 @Composable
@@ -105,10 +130,12 @@ private fun VoiceSection(
     title: String,
     voices: List<TtsVoiceChoice>,
     selectedName: String,
+    favorites: Set<String>,
     colors: androidx.compose.material3.ButtonColors,
     selectedColors: androidx.compose.material3.ButtonColors,
     onSelect: (TtsVoiceChoice) -> Unit,
     onPreview: (TtsVoiceChoice) -> Unit,
+    onFavorite: (TtsVoiceChoice) -> Unit,
 ) {
     Text(title, color = Color(0xFFE8F4F3), style = MaterialTheme.typography.titleMedium)
     if (voices.isEmpty()) {
@@ -117,17 +144,28 @@ private fun VoiceSection(
     }
     voices.forEach { voice ->
         val chosen = voice.name == selectedName
+        val favorite = voice.name in favorites
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
+            IconButton(onClick = { onFavorite(voice) }) {
+                Icon(
+                    imageVector = if (favorite) Icons.Filled.Star else Icons.Outlined.StarBorder,
+                    contentDescription = if (favorite) "Убрать из избранного" else "В избранное",
+                    tint = if (favorite) Color(0xFF1FA6A0) else Color(0xFF8AA8A6),
+                )
+            }
             Button(
                 onClick = { onSelect(voice) },
                 modifier = Modifier.weight(1f),
                 colors = if (chosen) selectedColors else colors
             ) {
-                Text(voice.label, maxLines = 2)
+                Text(
+                    text = if (chosen) "${voice.label} · активен" else voice.label,
+                    maxLines = 2,
+                )
             }
             IconButton(onClick = { onPreview(voice) }) {
                 Icon(Icons.Default.PlayArrow, contentDescription = "Прослушать", tint = Color(0xFFE8F4F3))

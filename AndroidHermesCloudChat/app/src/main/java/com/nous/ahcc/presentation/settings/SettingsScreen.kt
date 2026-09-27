@@ -45,8 +45,10 @@ fun SettingsScreen(
     onBack: () -> Unit,
     onOpenBluetoothTest: () -> Unit = {},
     onOpenVoiceTest: () -> Unit = {},
+    onOpenSttTest: () -> Unit = {},
     onOpenTelegramLogin: () -> Unit = {},
     onOpenTtsVoices: () -> Unit = {},
+    onOpenPlayTapTest: () -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var host by remember(state.config.host) { mutableStateOf(state.config.host) }
@@ -84,6 +86,73 @@ fun SettingsScreen(
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground
             )
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedButton(
+                onClick = onOpenBluetoothTest,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Тест кнопок Bluetooth-гарнитуры")
+            }
+            OutlinedButton(
+                onClick = onOpenTelegramLogin,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Вход в Telegram (пользователь)")
+            }
+            OutlinedButton(
+                onClick = onOpenTtsVoices,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Голоса озвучки")
+            }
+            OutlinedButton(
+                onClick = onOpenVoiceTest,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Тест голоса (Start / Play / Send)")
+            }
+            OutlinedButton(
+                onClick = onOpenSttTest,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Тест транскрибации")
+            }
+            OutlinedButton(
+                onClick = onOpenPlayTapTest,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Тест тройного Play")
+            }
+            Button(
+                onClick = {
+                    val parsedPort = port.toIntOrNull() ?: HermesConfig.PORT
+                    viewModel.updateConfig(
+                        ConnectionConfig(
+                            host = host.trim(),
+                            port = parsedPort,
+                            apiKey = apiKey,
+                            sessionId = sessionId.trim().ifBlank { HermesConfig.SESSION_ID },
+                            useTls = useTls,
+                            keepAliveInBackground = keepAlive,
+                            transport = TransportMode.WebSocket,
+                            model = state.config.model,
+                            inferenceBaseUrl = state.config.inferenceBaseUrl,
+                            agentApiBaseUrl = agentApiBaseUrl.trim(),
+                            supabaseUrl = supabaseUrl.trim(),
+                            supabaseAnonKey = supabaseAnonKey.trim(),
+                            telegramBotToken = state.config.telegramBotToken,
+                            telegramChatId = state.config.telegramChatId
+                        )
+                    )
+                    onBack()
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Save")
+            }
         }
 
         Spacer(Modifier.height(8.dp))
@@ -169,63 +238,16 @@ fun SettingsScreen(
                 checked = keepAlive,
                 onCheckedChange = { keepAlive = it }
             )
-        }
-
-        Spacer(Modifier.height(24.dp))
-        OutlinedButton(
-            onClick = onOpenBluetoothTest,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Тест кнопок Bluetooth-гарнитуры")
-        }
-        Spacer(Modifier.height(12.dp))
-        OutlinedButton(
-            onClick = onOpenTelegramLogin,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Вход в Telegram (пользователь)")
-        }
-        Spacer(Modifier.height(12.dp))
-        OutlinedButton(
-            onClick = onOpenTtsVoices,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Голоса озвучки")
-        }
-        Spacer(Modifier.height(12.dp))
-        OutlinedButton(
-            onClick = onOpenVoiceTest,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Тест голоса (Start / Play / Send)")
-        }
-        Spacer(Modifier.height(12.dp))
-        Button(
-            onClick = {
-                val parsedPort = port.toIntOrNull() ?: HermesConfig.PORT
-                viewModel.updateConfig(
-                    ConnectionConfig(
-                        host = host.trim(),
-                        port = parsedPort,
-                        apiKey = apiKey,
-                        sessionId = sessionId.trim().ifBlank { HermesConfig.SESSION_ID },
-                        useTls = useTls,
-                        keepAliveInBackground = keepAlive,
-                        transport = TransportMode.WebSocket,
-                        model = state.config.model,
-                        inferenceBaseUrl = state.config.inferenceBaseUrl,
-                        agentApiBaseUrl = agentApiBaseUrl.trim(),
-                        supabaseUrl = supabaseUrl.trim(),
-                        supabaseAnonKey = supabaseAnonKey.trim(),
-                        telegramBotToken = state.config.telegramBotToken,
-                        telegramChatId = state.config.telegramChatId
-                    )
-                )
-                onBack()
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Save")
+            SettingToggle(
+                title = "Транскрибация на телефоне",
+                checked = state.localTranscription,
+                onCheckedChange = viewModel::setLocalTranscription
+            )
+            Text(
+                text = "Голос распознаётся в AHCC и уходит агенту текстом.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
         Spacer(Modifier.height(32.dp))
     }

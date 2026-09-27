@@ -35,6 +35,7 @@ class ChatCuePlayer(context: Context) : TextToSpeech.OnInitListener {
     private var englishVoice = ""
     private var russianVoice = ""
     private var speechJob: Job? = null
+    private var workingJob: Job? = null
     private var utteranceWait: CompletableDeferred<Unit>? = null
     private var utteranceId: String? = null
 
@@ -110,6 +111,29 @@ class ChatCuePlayer(context: Context) : TextToSpeech.OnInitListener {
         playTones(1)
     }
 
+    /** English, Russian, then English twice more. */
+    fun speakFlashcard(english: String, russian: String) {
+        val en = english.trim()
+        val ru = russian.trim()
+        if (en.isEmpty() || ru.isEmpty()) return
+        speechJob?.cancel()
+        speechJob = scope.launch {
+            var waits = 0
+            while (!ready && waits < 20) {
+                delay(250)
+                waits++
+            }
+            speakRuns(
+                listOf(
+                    AgentReplyParts.SpeechRun("en", en),
+                    AgentReplyParts.SpeechRun("ru", ru),
+                    AgentReplyParts.SpeechRun("en", en),
+                    AgentReplyParts.SpeechRun("en", en),
+                )
+            )
+        }
+    }
+
     fun speak(text: String) {
         val clean = text.trim()
         if (clean.isEmpty()) return
@@ -132,6 +156,30 @@ class ChatCuePlayer(context: Context) : TextToSpeech.OnInitListener {
         runCatching { tts.stop() }
     }
 
+    /** Soft tick while Hermes is still producing a reply. */
+    fun startWorkingCue() {
+        if (workingJob?.isActive == true) return
+        workingJob = scope.launch {
+            while (true) {
+                playSoftTick()
+                delay(2200)
+            }
+        }
+    }
+
+    fun stopWorkingCue() {
+        workingJob?.cancel()
+        workingJob = null
+    }
+
+    suspend fun speakAwait(text: String) {
+        val clean = text.trim()
+        if (clean.isEmpty()) return
+        stopWorkingCue()
+        speechJob?.cancel()
+        speakNow(clean)
+    }
+
     fun shutdown() {
         scope.cancel()
         runCatching { tts.stop() }
@@ -143,7 +191,11 @@ class ChatCuePlayer(context: Context) : TextToSpeech.OnInitListener {
             pending = text
             return
         }
-        val runs = AgentReplyParts.speechRuns(text)
+        speakRuns(AgentReplyParts.speechRuns(text))
+    }
+
+    private suspend fun speakRuns(runs: List<AgentReplyParts.SpeechRun>) {
+        if (!ready) return
         for (run in runs) {
             val preferred = if (run.language == "ru") russianVoice else englishVoice
             applyVoice(run.language, preferred)
@@ -193,6 +245,16 @@ class ChatCuePlayer(context: Context) : TextToSpeech.OnInitListener {
             else -> "·"
         }
         return "${voice.locale.toLanguageTag()} $gender ${voice.name.substringAfterLast('-')} ($net)"
+    }
+
+    private suspend fun playSoftTick() {
+        val generator = ToneGenerator(AudioManager.STREAM_MUSIC, 35)
+        try {
+            generator.startTone(ToneGenerator.TONE_PROP_ACK, 60)
+            delay(90)
+        } finally {
+            generator.release()
+        }
     }
 
     private suspend fun playTones(count: Int) {

@@ -19,8 +19,12 @@ import com.nous.ahcc.domain.model.ConnectionState
 import com.nous.ahcc.domain.model.MediaKind
 import com.nous.ahcc.domain.model.MessageRole
 import com.nous.ahcc.domain.model.TransportMode
+import com.nous.ahcc.headset.HeadsetButtonEvent
+import com.nous.ahcc.headset.HeadsetLinkAnnouncer
 import com.nous.ahcc.headset.HeadsetMonitorService
 import com.nous.ahcc.media.ChatCuePlayer
+import com.nous.ahcc.media.SpeechTranscriber
+import com.nous.ahcc.media.SpeechTranscript
 import com.nous.ahcc.media.TtsVoiceChoice
 import com.nous.ahcc.media.MediaEnvelopeCodec
 import com.nous.ahcc.media.MediaLimits
@@ -40,6 +44,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.Duration
+import java.time.OffsetDateTime
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -60,7 +66,16 @@ data class ChatUiState(
     val ttsVoicesStatus: String = "",
     val ttsEnglishVoice: String = "",
     val ttsRussianVoice: String = "",
+    val ttsFavoriteVoices: Set<String> = emptySet(),
+    val localTranscription: Boolean = false,
+    val flashcardsActive: Boolean = false,
+    val flashcardCards: List<PhoneFlashcard> = emptyList(),
+    val flashcardIndex: Int = 0,
+    val flashcardBlanked: Boolean = true,
+    val playTapTestActive: Boolean = false,
 )
+
+data class PhoneFlashcard(val en: String, val ru: String)
 
 class HermesChatViewModel(
     application: Application,
@@ -72,6 +87,8 @@ class HermesChatViewModel(
     private val voiceRecorder = VoiceRecorder(application)
     private val voicePlayer = VoicePlayer()
     private val cues = ChatCuePlayer(application)
+    private val transcriber = SpeechTranscriber(application)
+    private val headsetAnnouncer = HeadsetLinkAnnouncer(application) { phrase -> cues.speak(phrase) }
     private val toolLog = ChatToolLog(application)
     private val sendInFlight = AtomicBoolean(false)
     private val autoConnectStarted = AtomicBoolean(false)
@@ -80,6 +97,158 @@ class HermesChatViewModel(
     private var spokenReply: String? = null
     private var loggedTools: List<String> = emptyList()
     private var pendingAssistantId: String? = null
+    private val spokenFlashcards = LinkedHashSet<String>()
+
+    private fun watchFlashcardsForSpeech() {
+        viewModelScope.launch {
+            var primed = false
+            while (true) {
+                val cfg = _uiState.value.config
+                if (cfg.supabaseUrl.isNotBlank() && cfg.supabaseAnonKey.isNotBlank()) {
+                    val rows = runCatching {
+                        withContext(Dispatchers.IO) {
+                            val sb = AhccSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey)
+                            try {
+                                sb.fetchRecentMessages(12)
+                            } finally {
+                                sb.close()
+                            }
+                        }
+                    }.getOrElse { emptyList() }
+                    val cards = rows.mapNotNull { row ->
+                        if (!row.senderName.equals("Hermes", ignoreCase = true)) return@mapNotNull null
+                        val card = AgentReplyParts.lastFlashcard(row.content) ?: return@mapNotNull null
+                        row.createdAt.orEmpty() to card
+                    }
+                    if (!primed) {
+                        primed = true
+                        val newest = cards.maxByOrNull { it.first }
+                        synchronized(spokenFlashcards) {
+                            cards.forEach { spokenFlashcards.add(flashcardKey(it.second)) }
+                        }
+                        if (newest != null && isRecentFlashcard(newest.first)) {
+                            synchronized(spokenFlashcards) {
+                                spokenFlashcards.remove(flashcardKey(newest.second))
+                            }
+                            speakFlashcardOnce(newest.second)
+                        }
+                    } else {
+                        cards.sortedBy { it.first }.forEach { speakFlashcardOnce(it.second) }
+                    }
+                }
+                delay(4_000)
+            }
+        }
+    }
+
+    private fun onTelegramFlashcard(text: String) {
+        ingestFlashcardControl(text)
+        val answer = AgentReplyParts.split(text).answer.ifBlank { text.trim() }
+        if (answer.isBlank()) return
+        _uiState.update { state ->
+            state.copy(
+                messages = state.messages + ChatMessage(
+                    id = UUID.randomUUID().toString(),
+                    role = MessageRole.Assistant,
+                    content = answer,
+                )
+            )
+        }
+        saveIncomingReply(answer)
+        AgentReplyParts.lastFlashcard(answer)?.let { speakFlashcardOnce(it) }
+    }
+
+    private fun speakFlashcardOnce(card: AgentReplyParts.Flashcard): Boolean {
+        val key = flashcardKey(card)
+        synchronized(spokenFlashcards) {
+            if (!spokenFlashcards.add(key)) return false
+        }
+        Log.i(TAG, "flashcard speak enChars=${card.en.length} ruChars=${card.ru.length}")
+        rememberFlashcard(card)
+        cues.speakFlashcard(card.en, card.ru)
+        return true
+    }
+
+    private fun ingestFlashcardControl(text: String) {
+        val lower = text.lowercase()
+        if (lower.contains("flashcard_stop")) {
+            exitFlashcards(sendStop = false)
+        } else if (lower.contains("flashcard_start")) {
+            _uiState.update { it.copy(flashcardsActive = true, flashcardBlanked = true) }
+        }
+    }
+
+    private fun rememberFlashcard(card: AgentReplyParts.Flashcard) {
+        _uiState.update { state ->
+            val line = PhoneFlashcard(card.en, card.ru)
+            val cards = if (state.flashcardCards.any { it.en == line.en && it.ru == line.ru }) {
+                state.flashcardCards
+            } else {
+                state.flashcardCards + line
+            }
+            state.copy(
+                flashcardsActive = true,
+                flashcardCards = cards,
+                flashcardIndex = cards.lastIndex.coerceAtLeast(0),
+                flashcardBlanked = true,
+            )
+        }
+    }
+
+    private fun onFlashcardPlay(taps: Int) {
+        when (taps) {
+            1 -> _uiState.update { it.copy(flashcardBlanked = false) }
+            2 -> _uiState.update { state ->
+                val last = (state.flashcardCards.size - 1).coerceAtLeast(0)
+                state.copy(
+                    flashcardIndex = (state.flashcardIndex + 1).coerceAtMost(last),
+                    flashcardBlanked = false,
+                )
+            }
+            else -> exitFlashcards(sendStop = true)
+        }
+    }
+
+    fun blankFlashcards() {
+        _uiState.update { state ->
+            if (state.flashcardsActive) state.copy(flashcardBlanked = true) else state
+        }
+    }
+
+    fun leaveFlashcards() {
+        exitFlashcards(sendStop = false)
+    }
+
+    private fun exitFlashcards(sendStop: Boolean) {
+        val wasActive = _uiState.value.flashcardsActive
+        _uiState.update { it.copy(flashcardsActive = false, flashcardBlanked = true) }
+        if (sendStop && wasActive) {
+            sendPrompt("останови карточки")
+        }
+    }
+
+    fun enterPlayTapTest() {
+        app.headsetHub.playTestActive = true
+        app.headsetHub.voiceGesturesEnabled = false
+        recordToken++
+        silenceWatchJob?.cancel()
+        silenceWatchJob = null
+        if (voiceRecorder.isRecording) voiceRecorder.cancel()
+        transcriber.cancel()
+        _uiState.update { it.copy(playTapTestActive = true, isRecording = false) }
+    }
+
+    fun leavePlayTapTest() {
+        app.headsetHub.playTestActive = false
+        _uiState.update { it.copy(playTapTestActive = false) }
+    }
+
+    private fun flashcardKey(card: AgentReplyParts.Flashcard) = "${card.en}\n${card.ru}"
+
+    private fun isRecentFlashcard(createdAt: String): Boolean {
+        val at = runCatching { OffsetDateTime.parse(createdAt).toInstant() }.getOrNull() ?: return false
+        return Duration.between(at, java.time.Instant.now()).toMinutes() <= 45
+    }
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -99,6 +268,19 @@ class HermesChatViewModel(
                     it.copy(ttsEnglishVoice = saved.english, ttsRussianVoice = saved.russian)
                 }
                 cues.setPreferredVoices(saved.english, saved.russian)
+            }
+        }
+        viewModelScope.launch {
+            preferences.ttsFavoritesFlow.collect { names ->
+                _uiState.update { it.copy(ttsFavoriteVoices = names) }
+            }
+        }
+        headsetAnnouncer.start()
+        app.telegramUser.onIdleMessage = { text -> onTelegramFlashcard(text) }
+        watchFlashcardsForSpeech()
+        viewModelScope.launch {
+            preferences.localTranscriptionFlow.collect { enabled ->
+                _uiState.update { it.copy(localTranscription = enabled) }
             }
         }
         viewModelScope.launch {
@@ -126,23 +308,39 @@ class HermesChatViewModel(
         }
         viewModelScope.launch {
             app.headsetHub.events.collect { event ->
-                onHeadsetEvent(event.label)
+                onHeadsetEvent(event)
             }
         }
     }
 
-    private fun ensureHeadsetCapture() {
-        HeadsetMonitorService.start(getApplication())
-    }
-
-    private fun onHeadsetEvent(label: String) {
-        if (_uiState.value.connectionState != ConnectionState.Connected) return
-        if (!label.equals("Play", ignoreCase = true) &&
-            !label.equals("HeadsetHook", ignoreCase = true)
-        ) {
+    fun claimHeadsetButtons() {
+        HeadsetMonitorService.reassert(getApplication())
+        if (app.headsetHub.playTestActive) {
+            app.headsetHub.voiceGesturesEnabled = false
             return
         }
-        if (!app.headsetHub.tryConsumeVoiceGesture()) return
+        app.headsetHub.voiceGesturesEnabled = true
+    }
+
+    private fun ensureHeadsetCapture() {
+        claimHeadsetButtons()
+    }
+
+    private fun onHeadsetEvent(event: HeadsetButtonEvent) {
+        if (app.headsetHub.playTestActive || _uiState.value.playTapTestActive) return
+        val play = event.tapCount > 1 ||
+            event.label.equals("Play", ignoreCase = true) ||
+            event.label.equals("HeadsetHook", ignoreCase = true) ||
+            event.label.equals("DoublePlay", ignoreCase = true) ||
+            event.label.equals("TriplePlay", ignoreCase = true)
+        if (!play) return
+        if (_uiState.value.flashcardsActive) {
+            onFlashcardPlay(event.tapCount.coerceIn(1, 3))
+            return
+        }
+        if (event.tapCount != 1) return
+        if (_uiState.value.connectionState != ConnectionState.Connected) return
+        if (!app.headsetHub.tryConsumeVoiceGesture(minIntervalMs = 40L)) return
         onVoicePlayPressed()
     }
 
@@ -246,6 +444,10 @@ class HermesChatViewModel(
     }
 
     fun sendPrompt(userPrompt: String = _uiState.value.draft.trim()) {
+        if (app.headsetHub.playTestActive || _uiState.value.playTapTestActive) {
+            Log.i(TAG, "send blocked — play test screen")
+            return
+        }
         if (userPrompt.isBlank()) return
         if (!app.telegramUser.isReady) {
             _uiState.update { it.copy(lastError = "Войдите в Telegram как пользователь: Настройки") }
@@ -277,6 +479,10 @@ class HermesChatViewModel(
 
     /** BT Play: start recording. A second Play stops and sends. */
     fun onVoicePlayPressed() {
+        if (app.headsetHub.playTestActive || _uiState.value.playTapTestActive) {
+            Log.i(TAG, "Play ignored — tap test screen")
+            return
+        }
         if (!app.telegramUser.isReady) {
             _uiState.update { it.copy(lastError = "Войдите в Telegram как пользователь: Настройки") }
             return
@@ -284,6 +490,15 @@ class HermesChatViewModel(
         if (sendInFlight.get() || _uiState.value.isSending) {
             Log.i(TAG, "Play ignored — waiting for Hermes reply")
             _uiState.update { it.copy(statusNotice = "Ждём ответ агента…") }
+            return
+        }
+        if (_uiState.value.localTranscription) {
+            if (_uiState.value.isRecording) {
+                transcriber.cancel()
+                _uiState.update { it.copy(isRecording = false, statusNotice = "Распознавание отменено") }
+            } else {
+                startLocalTranscription()
+            }
             return
         }
         if (voiceRecorder.isRecording || _uiState.value.isRecording) {
@@ -294,13 +509,40 @@ class HermesChatViewModel(
         startVoiceRecordingWithSilenceStop()
     }
 
+    private fun startLocalTranscription() {
+        cues.stopSpeaking()
+        _uiState.update {
+            it.copy(isRecording = true, lastError = null, statusNotice = "Слушаю… распознавание на телефоне")
+        }
+        viewModelScope.launch {
+            cues.beepAwait()
+            if (!_uiState.value.isRecording) return@launch
+            transcriber.start("ru-RU") { result ->
+                _uiState.update { it.copy(isRecording = false) }
+                when (result) {
+                    is SpeechTranscript.Success -> {
+                        if (isVoiceModeCommand(result.text)) {
+                            setLocalTranscription(false)
+                            cues.speak("Switched to voice messages.")
+                            _uiState.update { it.copy(statusNotice = "Режим голосовых сообщений") }
+                        } else {
+                            sendPrompt(result.text)
+                        }
+                    }
+                    SpeechTranscript.Empty ->
+                        _uiState.update { it.copy(lastError = "Речь не распознана") }
+                    SpeechTranscript.Cancelled ->
+                        _uiState.update { it.copy(statusNotice = "Распознавание отменено") }
+                    is SpeechTranscript.Error ->
+                        _uiState.update { it.copy(lastError = result.message) }
+                }
+            }
+        }
+    }
+
     /** Mic: start like Play; while recording, force-stop + send. */
     fun toggleVoiceRecording() {
-        if (voiceRecorder.isRecording || _uiState.value.isRecording) {
-            stopVoiceAndSend(notice = "Аудиофайл отправлен")
-        } else {
-            onVoicePlayPressed()
-        }
+        onVoicePlayPressed()
     }
 
     private var recordToken = 0
@@ -332,6 +574,15 @@ class HermesChatViewModel(
     }
 
     private fun stopVoiceAndSend(notice: String = "Аудиофайл отправлен") {
+        if (app.headsetHub.playTestActive || _uiState.value.playTapTestActive) {
+            recordToken++
+            silenceWatchJob?.cancel()
+            silenceWatchJob = null
+            voiceRecorder.cancel()
+            _uiState.update { it.copy(isRecording = false) }
+            Log.i(TAG, "voice send blocked — play test screen")
+            return
+        }
         recordToken++
         silenceWatchJob?.cancel()
         silenceWatchJob = null
@@ -530,7 +781,7 @@ class HermesChatViewModel(
                     path = first.localPath,
                     durationMs = first.durationMs ?: 0L,
                     botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME,
-                    caption = placeholder
+                    caption = "$placeholder\n\n$VOICE_FAIL_INSTRUCTION"
                 ) { partial -> showUserReply(partial, done = false) }
             } else {
                 error("Отправка этого файла от пользователя пока только для голоса")
@@ -539,18 +790,25 @@ class HermesChatViewModel(
         }
     }
 
+    private fun isVoiceModeCommand(text: String): Boolean {
+        val normalized = text.trim().lowercase().trim { it in ".,!?;:\"'«»" }
+        return normalized == "voice mode" || normalized == "режим голосовых сообщений"
+    }
+
     private fun showUserReply(reply: String, done: Boolean = true) {
         val split = AgentReplyParts.split(reply)
         if (split.tools.isNotEmpty()) recordTools(split.tools)
         val answer = split.answer
+        val speech = AgentReplyParts.forSpeech(answer)
+        val typing = !done && speech.isEmpty()
         val targetId = pendingAssistantId
         _uiState.update { state ->
             val existing = state.messages.any { it.id == targetId }
             val updated = if (targetId != null && existing) {
                 state.messages.map { msg ->
                     if (msg.id != targetId) msg
-                    else if (answer.isNotEmpty()) msg.copy(content = answer, isStreaming = !done, role = MessageRole.Assistant)
-                    else if (done) msg.copy(isStreaming = false)
+                    else if (answer.isNotEmpty()) msg.copy(content = answer, isStreaming = typing, role = MessageRole.Assistant)
+                    else if (!typing) msg.copy(isStreaming = false)
                     else msg
                 }
             } else if (answer.isNotEmpty()) {
@@ -558,22 +816,46 @@ class HermesChatViewModel(
                     id = targetId ?: UUID.randomUUID().toString(),
                     role = MessageRole.Assistant,
                     content = answer,
-                    isStreaming = !done
+                    isStreaming = typing
                 )
             } else {
                 state.messages
             }
-            state.copy(isSending = !done, messages = updated)
+            state.copy(isSending = typing, messages = updated)
         }
-        if (done) pendingAssistantId = null
-        val speech = AgentReplyParts.forSpeech(answer)
+        if (AgentReplyParts.requestsLocalTranscription(answer)) {
+            if (!done) return
+            pendingAssistantId = null
+            saveIncomingReply(answer)
+            setLocalTranscription(true)
+            cueVoiceReply = false
+            spokenReply = null
+            cues.stopWorkingCue()
+            cues.speak("Switched to phone transcription.")
+            return
+        }
+        if (done) {
+            pendingAssistantId = null
+            saveIncomingReply(answer)
+            ingestFlashcardControl(answer)
+            val card = AgentReplyParts.lastFlashcard(answer)
+            if (card != null) {
+                cueVoiceReply = false
+                spokenReply = null
+                cues.stopWorkingCue()
+                speakFlashcardOnce(card)
+                return
+            }
+        }
         if (speech.isEmpty()) {
             if (done) {
                 cueVoiceReply = false
                 spokenReply = null
+                cues.stopWorkingCue()
             }
             return
         }
+        cues.stopWorkingCue()
         if (!done) {
             if (speech == spokenReply) return
             val firstAnswer = spokenReply == null
@@ -638,6 +920,13 @@ class HermesChatViewModel(
         viewModelScope.launch { preferences.saveTtsVoices(english, russian) }
     }
 
+    fun toggleTtsFavorite(voice: TtsVoiceChoice) {
+        val current = _uiState.value.ttsFavoriteVoices
+        val next = if (voice.name in current) current - voice.name else current + voice.name
+        _uiState.update { it.copy(ttsFavoriteVoices = next) }
+        viewModelScope.launch { preferences.saveTtsFavorites(next) }
+    }
+
     fun previewTtsVoice(voice: TtsVoiceChoice) {
         cues.preview(voice.name, voice.language)
     }
@@ -651,6 +940,7 @@ class HermesChatViewModel(
         spokenReply = null
         loggedTools = emptyList()
         pendingAssistantId = assistantId
+        cues.startWorkingCue()
         val assistantPlaceholder = ChatMessage(
             id = assistantId,
             role = MessageRole.Assistant,
@@ -685,6 +975,7 @@ class HermesChatViewModel(
                     )
                 }
             } finally {
+                cues.stopWorkingCue()
                 sendInFlight.set(false)
             }
         }
@@ -858,18 +1149,22 @@ class HermesChatViewModel(
                 }
             )
         }
-        if (hermesText.isNotBlank()) {
-            val cfg = _uiState.value.config
-            viewModelScope.launch {
-                runCatching {
-                    withContext(Dispatchers.IO) {
-                        AhccSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey).insert(
-                            sessionId = cfg.sessionId,
-                            senderName = AhccSupabaseClient.SENDER_HERMES,
-                            content = hermesText,
-                            recipientName = AhccSupabaseClient.SENDER_ANDROID,
-                        )
-                    }
+        saveIncomingReply(hermesText)
+    }
+
+    private fun saveIncomingReply(content: String) {
+        val text = content.trim()
+        if (text.isBlank()) return
+        val cfg = _uiState.value.config
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    AhccSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey).insert(
+                        sessionId = cfg.sessionId,
+                        senderName = AhccSupabaseClient.SENDER_HERMES,
+                        content = text,
+                        recipientName = AhccSupabaseClient.SENDER_ANDROID,
+                    )
                 }
             }
         }
@@ -881,12 +1176,33 @@ class HermesChatViewModel(
         _uiState.update { it.copy(messages = emptyList(), lastError = null, playingPath = null) }
     }
 
+    fun setLocalTranscription(enabled: Boolean) {
+        _uiState.update { it.copy(localTranscription = enabled) }
+        viewModelScope.launch { preferences.saveLocalTranscription(enabled) }
+    }
+
+    fun shutdownApp(finish: () -> Unit) {
+        cues.stopWorkingCue()
+        transcriber.cancel()
+        voiceRecorder.cancel()
+        viewModelScope.launch {
+            runCatching { cues.speakAwait("AHCC is closing") }
+            finish()
+        }
+    }
+
+    fun stopSpokenReply() {
+        cues.stopSpeaking()
+    }
+
     fun clearError() {
         _uiState.update { it.copy(lastError = null) }
     }
 
     override fun onCleared() {
         silenceWatchJob?.cancel()
+        headsetAnnouncer.stop()
+        transcriber.shutdown()
         voiceRecorder.cancel()
         voicePlayer.stop()
         cues.shutdown()
@@ -895,6 +1211,9 @@ class HermesChatViewModel(
 
     companion object {
         private const val TAG = "AHCC-ChatVM"
+        private const val VOICE_FAIL_INSTRUCTION =
+            "If you cannot understand or transcribe the speech, reply with only this JSON and no other text: " +
+                "{\"skill\":\"local_transcription\",\"enabled\":true}"
     }
 }
 

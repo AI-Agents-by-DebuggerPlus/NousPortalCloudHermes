@@ -13,4 +13,9 @@ object HermesConfig {
     const val USE_TLS = true
     const val INFERENCE_BASE_URL = "https://inference-api.nousresearch.com"
     const val MODEL = "z-ai/glm-4.5-air"
+
+    /** Empty = auto (`https://HOST`). */
+    const val AGENT_API_BASE_URL = ""
+    const val SUPABASE_URL = ""
+    const val SUPABASE_ANON_KEY = ""
 }

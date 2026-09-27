@@ -313,7 +313,7 @@ private fun SimulateButtons(onSimulate: (String) -> Unit) {
             Text("Симулировать Play")
         }
         Text(
-            text = "Два быстрых «Play» → Next (2×Play). Отдельная кнопка Next — аппаратный Next.",
+            text = "Один Play, два быстрых — DoublePlay, три — TriplePlay. Отдельная кнопка Next — аппаратный Next.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
