@@ -56,6 +56,10 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -73,6 +77,10 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -101,6 +109,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nous.ahcc.BuildConfig
+import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.ChatMessage
 import com.nous.ahcc.domain.model.ConnectionState
 import com.nous.ahcc.domain.model.MediaKind
@@ -284,9 +293,14 @@ fun ChatScreen(
                 }
             }
 
+            val composerBusy = state.isSending || state.isRecording
             ComposerBar(
                 draft = state.draft,
                 enabled = state.connectionState == ConnectionState.Connected,
+                composerBusy = composerBusy,
+                addressees = Addressee.catalog,
+                selectedAddressee = state.currentAddressee,
+                onAddresseeSelect = viewModel::onAddresseeSelected,
                 isRecording = state.isRecording,
                 onDraftChange = viewModel::onDraftChange,
                 onSend = { viewModel.sendPrompt() },
@@ -612,10 +626,71 @@ private fun MessageBubble(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddresseeDropdown(
+    addressees: List<Addressee>,
+    selected: Addressee,
+    enabled: Boolean,
+    onSelect: (Addressee) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { if (enabled) expanded = !expanded },
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        OutlinedTextField(
+            value = selected.displayName,
+            onValueChange = {},
+            readOnly = true,
+            enabled = enabled,
+            label = { Text("Адресат (Gate = без TO:)") },
+            trailingIcon = {
+                ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
+            },
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = MaterialTheme.colorScheme.outline,
+                focusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+                unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.35f),
+                disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                disabledBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+            ),
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.exposedDropdownSize(matchTextFieldWidth = true),
+        ) {
+            addressees.forEach { addressee ->
+                DropdownMenuItem(
+                    text = { Text(addressee.displayName) },
+                    onClick = {
+                        onSelect(addressee)
+                        expanded = false
+                    },
+                    contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ComposerBar(
     draft: String,
     enabled: Boolean,
+    composerBusy: Boolean,
+    addressees: List<Addressee>,
+    selectedAddressee: Addressee,
+    onAddresseeSelect: (Addressee) -> Unit,
     isRecording: Boolean,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -624,6 +699,12 @@ private fun ComposerBar(
     onMic: () -> Unit
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
+        AddresseeDropdown(
+            addressees = addressees,
+            selected = selectedAddressee,
+            enabled = enabled && !composerBusy,
+            onSelect = onAddresseeSelect,
+        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()

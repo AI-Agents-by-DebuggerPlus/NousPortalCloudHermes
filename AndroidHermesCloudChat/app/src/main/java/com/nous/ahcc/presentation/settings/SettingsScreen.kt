@@ -35,6 +35,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nous.ahcc.config.HermesConfig
+import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.ConnectionConfig
 import com.nous.ahcc.domain.model.TransportMode
 import com.nous.ahcc.presentation.chat.HermesChatViewModel
@@ -245,6 +246,12 @@ fun SettingsScreen(
             )
             Text(
                 text = "Голос распознаётся в AHCC и уходит агенту текстом.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                text = "Адресаты: ${Addressee.catalog.joinToString { it.displayName }}. " +
+                    "Добавление и удаление — в Addressee.kt (catalog), см. Docs/Guides/AHCC-Addressees.md.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

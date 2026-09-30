@@ -11,6 +11,7 @@ import com.nous.ahcc.AhccApp
 import com.nous.ahcc.data.HermesChatGateway
 import com.nous.ahcc.data.local.ChatToolLog
 import com.nous.ahcc.data.local.ConnectionPreferences
+import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.AgentReplyParts
 import com.nous.ahcc.domain.model.ChatAttachment
 import com.nous.ahcc.domain.model.ChatMessage
@@ -73,6 +74,7 @@ data class ChatUiState(
     val flashcardIndex: Int = 0,
     val flashcardBlanked: Boolean = true,
     val playTapTestActive: Boolean = false,
+    val currentAddressee: Addressee = Addressee.default,
 )
 
 data class PhoneFlashcard(val en: String, val ru: String)
@@ -348,6 +350,19 @@ class HermesChatViewModel(
         _uiState.update { it.copy(draft = value) }
     }
 
+    fun onAddresseeSelected(addressee: Addressee) {
+        _uiState.update { it.copy(currentAddressee = addressee) }
+    }
+
+    private fun wireForAgent(text: String): String =
+        Addressee.wireText(text, _uiState.value.currentAddressee)
+
+    private fun maybeResetAddresseeAfterSend(userText: String) {
+        if (Addressee.isSessionEndCommand(userText)) {
+            _uiState.update { it.copy(currentAddressee = Addressee.default) }
+        }
+    }
+
     fun updateConfig(config: ConnectionConfig) {
         viewModelScope.launch {
             preferences.save(config)
@@ -449,6 +464,10 @@ class HermesChatViewModel(
             return
         }
         if (userPrompt.isBlank()) return
+        if (isNewSessionCommand(userPrompt)) {
+            startHermesSession()
+            return
+        }
         if (!app.telegramUser.isReady) {
             _uiState.update { it.copy(lastError = "Войдите в Telegram как пользователь: Настройки") }
             return
@@ -461,19 +480,21 @@ class HermesChatViewModel(
             )
         ) {
             val cfg = _uiState.value.config
+            val wireText = wireForAgent(userPrompt)
             withContext(Dispatchers.IO) {
                 AhccSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey).insert(
                     sessionId = cfg.sessionId,
                     senderName = AhccSupabaseClient.SENDER_ANDROID,
-                    content = userPrompt,
+                    content = wireText,
                     recipientName = AhccSupabaseClient.SENDER_HERMES,
                 )
             }
             val reply = app.telegramUser.sendTextAndWaitReply(
-                text = userPrompt,
+                text = wireText,
                 botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME
             ) { partial -> showUserReply(partial, done = false) }
             showUserReply(reply)
+            maybeResetAddresseeAfterSend(userPrompt)
         }
     }
 
@@ -745,13 +766,15 @@ class HermesChatViewModel(
                 append('\n')
             }
         }.trim()
+        val wirePlaceholder = wireForAgent(placeholder)
+        val captionForEndCheck = caption?.trim().orEmpty().ifBlank { placeholder }
         val photoB64 = attachments.firstOrNull { it.kind == MediaKind.Photo }
             ?.let { Base64.encodeToString(it.bytes, Base64.NO_WRAP) }
         val first = attachments.first()
         Log.i(
             TAG,
             "sendAttachments kind=${first.kind} name=${first.name} raw=${first.bytes.size}B " +
-                "wsCaptionChars=${placeholder.length} attachments=${wires.size} → Telegram"
+                "wsCaptionChars=${wirePlaceholder.length} attachments=${wires.size} → Telegram"
         )
         beginSend(
             userMessage = ChatMessage(
@@ -772,7 +795,7 @@ class HermesChatViewModel(
                 AhccSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey).insert(
                     sessionId = sessionId,
                     senderName = AhccSupabaseClient.SENDER_ANDROID,
-                    content = placeholder,
+                    content = wirePlaceholder,
                     recipientName = AhccSupabaseClient.SENDER_HERMES,
                 )
             }
@@ -781,18 +804,76 @@ class HermesChatViewModel(
                     path = first.localPath,
                     durationMs = first.durationMs ?: 0L,
                     botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME,
-                    caption = "$placeholder\n\n$VOICE_FAIL_INSTRUCTION"
+                    caption = "$wirePlaceholder\n\n$VOICE_FAIL_INSTRUCTION"
                 ) { partial -> showUserReply(partial, done = false) }
             } else {
                 error("Отправка этого файла от пользователя пока только для голоса")
             }
             showUserReply(reply)
+            maybeResetAddresseeAfterSend(captionForEndCheck)
         }
     }
 
     private fun isVoiceModeCommand(text: String): Boolean {
         val normalized = text.trim().lowercase().trim { it in ".,!?;:\"'«»" }
         return normalized == "voice mode" || normalized == "режим голосовых сообщений"
+    }
+
+    private fun isNewSessionCommand(text: String): Boolean {
+        val normalized = text.trim().lowercase().trim { it in ".,!?;:\"'«»" }
+        return normalized == "new session" || normalized == "новая сессия"
+    }
+
+    /** Slash command on the Hermes gateway. Does not enter the model context. */
+    private fun startHermesSession() {
+        if (!app.telegramUser.isReady) {
+            _uiState.update { it.copy(lastError = "Войдите в Telegram как пользователь: Настройки") }
+            return
+        }
+        val cfg = _uiState.value.config
+        viewModelScope.launch {
+            val resolved = try {
+                withContext(Dispatchers.IO) {
+                    AhccSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey).resolveOrCreateSession(
+                        forceNew = true,
+                        preferredId = cfg.sessionId,
+                        senderName = AhccSupabaseClient.SENDER_ANDROID,
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(lastError = e.message ?: "Не удалось создать сессию") }
+                return@launch
+            }
+            val next = cfg.copy(sessionId = resolved)
+            preferences.save(next)
+            _uiState.update {
+                it.copy(
+                    config = next,
+                    draft = "",
+                    messages = listOf(
+                        ChatMessage(
+                            id = UUID.randomUUID().toString(),
+                            role = MessageRole.System,
+                            content = "Session $resolved"
+                        )
+                    )
+                )
+            }
+            beginSend(
+                userMessage = ChatMessage(
+                    id = UUID.randomUUID().toString(),
+                    role = MessageRole.User,
+                    content = "/new now"
+                )
+            ) {
+                val reply = app.telegramUser.sendTextAndWaitReply(
+                    text = "/new now",
+                    botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME
+                ) { partial -> showUserReply(partial, done = false) }
+                showUserReply(reply)
+                if (reply.isBlank()) cues.speak("New session started.")
+            }
+        }
     }
 
     private fun showUserReply(reply: String, done: Boolean = true) {
