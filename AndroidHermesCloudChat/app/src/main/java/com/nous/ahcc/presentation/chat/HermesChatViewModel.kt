@@ -75,6 +75,7 @@ data class ChatUiState(
     val flashcardBlanked: Boolean = true,
     val playTapTestActive: Boolean = false,
     val currentAddressee: Addressee = Addressee.default,
+    val addressees: List<Addressee> = Addressee.defaultCatalog,
 )
 
 data class PhoneFlashcard(val en: String, val ru: String)
@@ -286,6 +287,15 @@ class HermesChatViewModel(
             }
         }
         viewModelScope.launch {
+            preferences.addresseeCatalogFlow.collect { list ->
+                _uiState.update { state ->
+                    val current = state.currentAddressee
+                    val resolved = list.find { it.id == current.id } ?: Addressee.default
+                    state.copy(addressees = list, currentAddressee = resolved)
+                }
+            }
+        }
+        viewModelScope.launch {
             chatGateway.connectionState.collect { state ->
                 _uiState.update { it.copy(connectionState = state) }
                 if (state == ConnectionState.Connected) {
@@ -352,6 +362,43 @@ class HermesChatViewModel(
 
     fun onAddresseeSelected(addressee: Addressee) {
         _uiState.update { it.copy(currentAddressee = addressee) }
+    }
+
+    fun deleteCurrentAddressee() {
+        val current = _uiState.value.currentAddressee
+        if (current.id == Addressee.LIAISON_ID) {
+            _uiState.update { it.copy(statusNotice = "MainAgent cannot be deleted") }
+            return
+        }
+        viewModelScope.launch {
+            val next = preferences.removeAddressee(current.id)
+            _uiState.update {
+                it.copy(
+                    addressees = next,
+                    currentAddressee = Addressee.default,
+                    statusNotice = "Receiver deleted",
+                )
+            }
+        }
+    }
+
+    fun addAddressee(displayName: String, addressingKey: String?) {
+        val name = displayName.trim()
+        if (name.isEmpty()) return
+        viewModelScope.launch {
+            val existing = preferences.readAddresseeCatalog()
+            val id = addressingKey?.trim()?.takeIf { it.isNotEmpty() }
+                ?: Addressee.newId(name, existing)
+            if (existing.any { it.id.equals(id, ignoreCase = true) }) {
+                _uiState.update { it.copy(lastError = "Addressing key already exists: $id") }
+                return@launch
+            }
+            val added = Addressee(id, name)
+            val next = preferences.addAddressee(added)
+            _uiState.update {
+                it.copy(addressees = next, currentAddressee = added, statusNotice = "Receiver added")
+            }
+        }
     }
 
     private fun wireForAgent(text: String): String =

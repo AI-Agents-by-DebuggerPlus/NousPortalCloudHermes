@@ -60,6 +60,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -298,9 +299,11 @@ fun ChatScreen(
                 draft = state.draft,
                 enabled = state.connectionState == ConnectionState.Connected,
                 composerBusy = composerBusy,
-                addressees = Addressee.catalog,
+                addressees = state.addressees,
                 selectedAddressee = state.currentAddressee,
                 onAddresseeSelect = viewModel::onAddresseeSelected,
+                onDeleteCurrentReceiver = viewModel::deleteCurrentAddressee,
+                onAddReceiver = viewModel::addAddressee,
                 isRecording = state.isRecording,
                 onDraftChange = viewModel::onDraftChange,
                 onSend = { viewModel.sendPrompt() },
@@ -647,7 +650,7 @@ private fun AddresseeDropdown(
             onValueChange = {},
             readOnly = true,
             enabled = enabled,
-            label = { Text("Адресат (Gate = без TO:)") },
+            label = { Text("Адресат (MainAgent = без TO:)") },
             trailingIcon = {
                 ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
             },
@@ -671,7 +674,18 @@ private fun AddresseeDropdown(
         ) {
             addressees.forEach { addressee ->
                 DropdownMenuItem(
-                    text = { Text(addressee.displayName) },
+                    text = {
+                        Column {
+                            Text(addressee.displayName)
+                            if (addressee.id != Addressee.LIAISON_ID) {
+                                Text(
+                                    addressee.id,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    },
                     onClick = {
                         onSelect(addressee)
                         expanded = false
@@ -684,6 +698,57 @@ private fun AddresseeDropdown(
 }
 
 @Composable
+private fun AddReceiverDialog(
+    onDismiss: () -> Unit,
+    onConfirm: (displayName: String, addressingKey: String?) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var key by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add new receiver") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Display name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = key,
+                    onValueChange = { key = it.filter { ch -> ch.isLetterOrDigit() || ch == '_' } },
+                    label = { Text("Addressing key (optional)") },
+                    placeholder = { Text("english_tutor") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "Sent as: TO: <key> on the first line of the message.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(name, key.ifBlank { null })
+                    onDismiss()
+                },
+                enabled = name.isNotBlank(),
+            ) {
+                Text("Add")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+    )
+}
+
+@Composable
 private fun ComposerBar(
     draft: String,
     enabled: Boolean,
@@ -691,6 +756,8 @@ private fun ComposerBar(
     addressees: List<Addressee>,
     selectedAddressee: Addressee,
     onAddresseeSelect: (Addressee) -> Unit,
+    onDeleteCurrentReceiver: () -> Unit,
+    onAddReceiver: (displayName: String, addressingKey: String?) -> Unit,
     isRecording: Boolean,
     onDraftChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -698,13 +765,43 @@ private fun ComposerBar(
     onCamera: () -> Unit,
     onMic: () -> Unit
 ) {
+    var showAddReceiver by remember { mutableStateOf(false) }
+    val receiverControlsEnabled = enabled && !composerBusy
+    val canDeleteCurrent = selectedAddressee.id != Addressee.LIAISON_ID
+    if (showAddReceiver) {
+        AddReceiverDialog(
+            onDismiss = { showAddReceiver = false },
+            onConfirm = onAddReceiver,
+        )
+    }
     Column(modifier = Modifier.fillMaxWidth()) {
         AddresseeDropdown(
             addressees = addressees,
             selected = selectedAddressee,
-            enabled = enabled && !composerBusy,
+            enabled = receiverControlsEnabled,
             onSelect = onAddresseeSelect,
         )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = onDeleteCurrentReceiver,
+                enabled = receiverControlsEnabled && canDeleteCurrent,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Delete current receiver", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = { showAddReceiver = true },
+                enabled = receiverControlsEnabled,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Add new receiver", maxLines = 1)
+            }
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()

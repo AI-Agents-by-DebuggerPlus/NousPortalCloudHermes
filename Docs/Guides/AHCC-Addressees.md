@@ -1,33 +1,30 @@
 # AHCC — адресаты сообщений
 
-## Где добавлять и удалять
+## Список получателей
 
-Единственное место в MVP:
+- **В чате:** dropdown «Адресат», кнопки **Delete current receiver** и **Add new receiver**.
+- Список сохраняется в DataStore на телефоне (переживает перезапуск).
+- **MainAgent** (`liaison`) — по умолчанию, удалить нельзя, строка `TO:` не добавляется.
 
-`AndroidHermesCloudChat/app/src/main/java/com/nous/ahcc/domain/model/Addressee.kt`
+## Ключ адресации
 
-Редактируйте список **`Addressee.catalog`**:
+Для любого получателя, кроме MainAgent, в Telegram уходит:
 
-```kotlin
-val catalog: List<Addressee> = listOf(
-    Addressee(LIAISON_ID, "Gate"),           // id liaison — без строки TO:
-    Addressee("english_tutor", "EnglishTutor"),
-    Addressee("my_skill", "MySkill"),        // пример нового адресата
-)
+```text
+TO: <addressing_key>
+<текст пользователя>
 ```
 
-- **`id`** — стабильный ключ (латиница, snake_case).
-- **`displayName`** — подпись в dropdown и в первой строке исходящего текста: `TO: displayName`.
+Ключ — поле `id` (например `english_tutor`). В диалоге «Add new receiver» его можно задать вручную; иначе генерируется из display name.
 
-После изменения списка пересоберите и установите AHCC. В **Settings → Connection** показаны текущие адресаты только для справки.
+## Запасной вариант в коде
 
-Позже планируется синхронизация с Dashboard / редактирование в настройках без пересборки.
+Начальный каталог, если хранилище пустое:
 
-## Поведение
+`AndroidHermesCloudChat/app/src/main/java/com/nous/ahcc/domain/model/Addressee.kt` → `defaultCatalog`.
 
-| Адресат | Исходящий текст в Telegram |
-|---------|----------------------------|
-| Gate (`liaison`) | Как введено пользователем |
-| Любой другой | `TO: EnglishTutor` + перевод строки + текст |
+После первого запуска с UI список живёт в prefs (`addressee_catalog_json`).
 
-Команды **завершить / закончить / стоп / хватит** (без учёта регистра) после отправки возвращают выбор на **Gate**.
+## Завершение сессии с адресатом
+
+После отправки **завершить / закончить / стоп / хватит** выбор снова **MainAgent** (сообщение уходит текущему адресату, затем сброс).

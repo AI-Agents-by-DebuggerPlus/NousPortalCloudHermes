@@ -250,8 +250,8 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Text(
-                text = "Адресаты: ${Addressee.catalog.joinToString { it.displayName }}. " +
-                    "Добавление и удаление — в Addressee.kt (catalog), см. Docs/Guides/AHCC-Addressees.md.",
+                text = "Адресаты: ${Addressee.defaultCatalog.joinToString { it.displayName }} (и добавленные в чате). " +
+                    "См. Docs/Guides/AHCC-Addressees.md.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

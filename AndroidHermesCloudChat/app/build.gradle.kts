@@ -13,13 +13,13 @@ android {
         applicationId = "com.nous.ahcc"
         minSdk = 26
         targetSdk = 35
-        versionCode = 54
-        versionName = "1.4.35"
+        versionCode = 56
+        versionName = "1.4.37"
         ndk {
             abiFilters += "arm64-v8a"
         }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "VERSION_LABEL", "\"1.4.35 (54)\"")
+        buildConfigField("String", "VERSION_LABEL", "\"1.4.37 (56)\"")
     }
 
     buildTypes {

@@ -10,9 +10,11 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.nous.ahcc.config.HermesConfig
+import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.ConnectionConfig
 import com.nous.ahcc.domain.model.TransportMode
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "ahcc_prefs")
@@ -41,6 +43,42 @@ class ConnectionPreferences(private val context: Context) {
         val ttsRussianVoice = stringPreferencesKey("tts_russian_voice")
         val ttsFavoriteVoices = stringSetPreferencesKey("tts_favorite_voices")
         val localTranscription = booleanPreferencesKey("local_transcription")
+        val addresseeCatalogJson = stringPreferencesKey("addressee_catalog_json")
+    }
+
+    val addresseeCatalogFlow: Flow<List<Addressee>> = context.dataStore.data.map { prefs ->
+        Addressee.decodeCatalog(prefs[Keys.addresseeCatalogJson]).ifEmpty { Addressee.defaultCatalog }
+    }
+
+    suspend fun saveAddresseeCatalog(list: List<Addressee>) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.addresseeCatalogJson] = Addressee.encodeCatalog(list)
+        }
+    }
+
+    suspend fun readAddresseeCatalog(): List<Addressee> {
+        val prefs = context.dataStore.data.first()
+        return Addressee.decodeCatalog(prefs[Keys.addresseeCatalogJson]).ifEmpty { Addressee.defaultCatalog }
+    }
+
+    suspend fun addAddressee(addressee: Addressee): List<Addressee> {
+        val current = readAddresseeCatalog()
+        if (current.any { it.id.equals(addressee.id, ignoreCase = true) }) return current
+        val next = current + addressee
+        saveAddresseeCatalog(next)
+        return next
+    }
+
+    suspend fun removeAddressee(id: String): List<Addressee> {
+        if (id == Addressee.LIAISON_ID) return readAddresseeCatalog()
+        val next = readAddresseeCatalog().filterNot { it.id == id }
+        val normalized = if (next.any { it.id == Addressee.LIAISON_ID }) {
+            next
+        } else {
+            Addressee.defaultCatalog
+        }
+        saveAddresseeCatalog(normalized)
+        return normalized
     }
 
     data class TelegramTarget(val botToken: String, val chatId: String)
