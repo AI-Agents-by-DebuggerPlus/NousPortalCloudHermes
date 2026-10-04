@@ -3,6 +3,9 @@
 # Версия приложения на момент отчёта: 1.1.3 (5)
 # Образец захвата: AndroidChat — FGS mediaPlayback + MediaSessionCompat
 # Образец жестов Play/Next: AndroidEnglishTutor — debounce + double-tap → Next
+#
+# Актуальная логика Play / Next / Stop (1.4.62+):
+# → [AHCC-BT-Play-Gestures-Test.md](AHCC-BT-Play-Gestures-Test.md)
 
 ## Цель
 
@@ -75,25 +78,27 @@ BluetoothTestViewModel  ──start/stop──►  HeadsetMonitorService (FGS)
 `notifyButton(..., source = "ui-simulate")`. Поэтому UI-кнопки работают
 даже при выключенном capture.
 
-## Жесты Play / Next (как в AndroidEnglishTutor)
+## Жесты Play / Next / Stop
 
-`HeadsetButtonHub` + `HeadsetButtonPreferences`:
+Подробно (Buds Previous→Stop, серия 1×/2×/3×, отключение голоса на экране теста):
+[AHCC-BT-Play-Gestures-Test.md](AHCC-BT-Play-Gestures-Test.md).
+
+Кратко:
 
 | Жест | Результат |
 |------|-----------|
-| Одиночный Play/Pause/Hook | После окна `nextDoubleTapMs` (по умолчанию 400 ms) → счётчик **Play** |
-| Второй Play-жест в окне | Отмена pending Play → счётчик **Next (2×Play)** |
-| Аппаратный `MEDIA_NEXT` | Счётчик **Next**; companion Play подавляется на `nextDoubleTapMs` |
-| Debounce после commit | Опционально, интервал по умолчанию 500 ms |
+| Одиночный Play/Pause/Hook | После окна серии → **Play** |
+| 2× в окне / аппаратный `MEDIA_NEXT` | **Next** |
+| 3× в окне / `MEDIA_PREVIOUS` / `MEDIA_STOP` | **Stop** |
 
-Настройки хранятся в SharedPreferences `ahcc_headset_button_prefs`.
+Настройки: SharedPreferences `ahcc_headset_button_prefs`.
 
 ## Состояние на экране
 
 `HeadsetTestState`:
 
 - `captureOn` — сервис запущен;
-- `pressCount` / `nextCount` — счётчики Play и Next;
+- `pressCount` / `nextCount` / `stopCount` — счётчики Play, Next и Stop;
 - `lastLabel` / `lastAt` / `lastKind` — последнее событие;
 - `eventLog` — до 40 строк вида  
   `12:34:56.789  [HARDWARE]  Play  (#3)` или `Next (2×Play)`.

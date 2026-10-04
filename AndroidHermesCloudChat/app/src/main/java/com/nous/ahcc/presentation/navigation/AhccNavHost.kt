@@ -1,6 +1,9 @@
 package com.nous.ahcc.presentation.navigation
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -12,6 +15,7 @@ import com.nous.ahcc.presentation.chat.ChatScreen
 import com.nous.ahcc.presentation.chat.ChatToolLogScreen
 import com.nous.ahcc.presentation.chat.FlashcardsScreen
 import com.nous.ahcc.presentation.chat.HermesChatViewModel
+import com.nous.ahcc.presentation.chat.MemoryReviewOverlay
 import com.nous.ahcc.presentation.chat.TtsVoiceScreen
 import com.nous.ahcc.presentation.headset.PlayTapTestScreen
 import com.nous.ahcc.presentation.settings.SettingsScreen
@@ -36,8 +40,20 @@ fun AhccNavHost(viewModel: HermesChatViewModel) {
     val route = navEntry?.destination?.route
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     LaunchedEffect(route) {
-        if (route == Routes.PlayTapTest) viewModel.enterPlayTapTest()
-        else viewModel.leavePlayTapTest()
+        when (route) {
+            Routes.PlayTapTest -> {
+                viewModel.leaveBluetoothTest()
+                viewModel.enterPlayTapTest()
+            }
+            Routes.BluetoothTest -> {
+                viewModel.leavePlayTapTest()
+                viewModel.enterBluetoothTest()
+            }
+            else -> {
+                viewModel.leavePlayTapTest()
+                viewModel.leaveBluetoothTest()
+            }
+        }
     }
     LaunchedEffect(state.flashcardsActive, route) {
         if (route == Routes.PlayTapTest) return@LaunchedEffect
@@ -48,6 +64,7 @@ fun AhccNavHost(viewModel: HermesChatViewModel) {
             navController.popBackStack()
         }
     }
+    Box(modifier = Modifier.fillMaxSize()) {
     NavHost(navController = navController, startDestination = Routes.Chat) {
         composable(Routes.Chat) {
             ChatScreen(
@@ -111,5 +128,19 @@ fun AhccNavHost(viewModel: HermesChatViewModel) {
                 onBack = { navController.popBackStack() }
             )
         }
+    }
+    state.memoryReviewOverlay?.let { overlay ->
+        MemoryReviewOverlay(
+            state = overlay,
+            commandsEnabled = !state.isSending,
+            globalAutoApproveActive = state.memoryGlobalAutoApprove,
+            onDismiss = { viewModel.dismissMemoryReviewOverlay() },
+            onApplyCurrent = { viewModel.memoryReviewApplyCurrent() },
+            onDenyCurrent = { viewModel.memoryReviewDenyCurrent() },
+            onApplyAllSequential = { viewModel.memoryReviewApplyAllSequential() },
+            onDenyAllSequential = { viewModel.memoryReviewDenyAllSequential() },
+            onGlobalApplyAll = { viewModel.memoryReviewGlobalApplyAll() },
+        )
+    }
     }
 }

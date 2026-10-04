@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import com.nous.ahcc.config.HermesConfig
 import com.nous.ahcc.domain.model.AgentReplyParts
+import com.nous.ahcc.domain.model.MemoryReviewNotification
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
@@ -52,10 +53,13 @@ class TelegramUserSession(context: Context) {
     private val replyParts = linkedMapOf<Long, String>()
     private val outgoingIds = mutableSetOf<Long>()
     private val idleFlashcardIds = mutableSetOf<Long>()
+    private val idleMemoryReviewIds = mutableSetOf<Long>()
     @Volatile private var replyWaiter: CompletableDeferred<String>? = null
     @Volatile private var onReply: ((String) -> Unit)? = null
     /** Incoming bot messages that arrive after AHCC stopped waiting, such as a later flashcard. */
     @Volatile var onIdleMessage: ((String) -> Unit)? = null
+    /** Self-improvement / memory approval notices while not waiting on a reply. */
+    @Volatile var onMemoryReviewMessage: ((String) -> Unit)? = null
     private var quietJob: Job? = null
 
     var apiId: Int = 0
@@ -257,6 +261,13 @@ class TelegramUserSession(context: Context) {
         if (text.isEmpty() || AgentReplyParts.isOwnEcho(text)) return
         val waiter = replyWaiter
         if (waiter == null) {
+            if (MemoryReviewNotification.isNotification(text)) {
+                val fresh = synchronized(replyLock) { idleMemoryReviewIds.add(messageId) }
+                if (fresh) {
+                    Log.i(TAG, "idle memory review chars=${text.length}")
+                    onMemoryReviewMessage?.invoke(text)
+                }
+            }
             if (!AgentReplyParts.isFlashcardRelay(text)) return
             val fresh = synchronized(replyLock) { idleFlashcardIds.add(messageId) }
             if (!fresh) return
@@ -270,13 +281,22 @@ class TelegramUserSession(context: Context) {
         }
         Log.i(TAG, "reply update chars=${shown.length}")
         if (shown.isNotEmpty()) onReply?.invoke(shown)
+        val hasMemory = synchronized(replyLock) {
+            replyParts.values.any { MemoryReviewNotification.isNotification(it) }
+        }
         val hasAnswer = synchronized(replyLock) {
             replyParts.values.any { AgentReplyParts.containsAnswer(it) }
         }
         quietJob?.cancel()
-        if (!hasAnswer) return
+        // Memory pending arrives as one (or few) finished dumps — don't wait 15s.
+        val quietMs = when {
+            hasMemory -> MEMORY_QUIET_MS
+            hasAnswer -> ANSWER_QUIET_MS
+            else -> PARTIAL_QUIET_MS
+        }
+        if (!hasAnswer && shown.isBlank()) return
         quietJob = sessionScope.launch {
-            delay(ANSWER_QUIET_MS)
+            delay(quietMs)
             val latest = snapshotForUi()
             if (replyWaiter !== waiter || waiter.isCompleted || latest.isBlank()) return@launch
             waiter.complete(latest)
@@ -327,6 +347,10 @@ class TelegramUserSession(context: Context) {
     companion object {
         private const val TAG = "AHCC-TG-User"
         private const val ANSWER_QUIET_MS = 15_000L
+        /** Tool-only or routing cards without speakable prose. */
+        private const val PARTIAL_QUIET_MS = 4_000L
+        /** `/memory pending` and review notices are complete payloads. */
+        private const val MEMORY_QUIET_MS = 2_000L
         private const val WAIT_MS = 180_000L
     }
 }

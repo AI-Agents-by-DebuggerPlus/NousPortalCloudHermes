@@ -111,8 +111,8 @@ class ChatCuePlayer(context: Context) : TextToSpeech.OnInitListener {
         playTones(1)
     }
 
-    /** English, Russian, then English twice more. */
-    fun speakFlashcard(english: String, russian: String) {
+    /** EN → pause → RU → pause → EN → pause → EN (long wait until next Play is outside TTS). */
+    fun speakFlashcard(english: String, russian: String, pauseMs: Long = 3_000L) {
         val en = english.trim()
         val ru = russian.trim()
         if (en.isEmpty() || ru.isEmpty()) return
@@ -123,14 +123,19 @@ class ChatCuePlayer(context: Context) : TextToSpeech.OnInitListener {
                 delay(250)
                 waits++
             }
-            speakRuns(
-                listOf(
-                    AgentReplyParts.SpeechRun("en", en),
-                    AgentReplyParts.SpeechRun("ru", ru),
-                    AgentReplyParts.SpeechRun("en", en),
-                    AgentReplyParts.SpeechRun("en", en),
-                )
+            val runs = listOf(
+                AgentReplyParts.SpeechRun("en", en),
+                AgentReplyParts.SpeechRun("ru", ru),
+                AgentReplyParts.SpeechRun("en", en),
+                AgentReplyParts.SpeechRun("en", en),
             )
+            val gap = pauseMs.coerceAtLeast(0L)
+            runs.forEachIndexed { index, run ->
+                speakSingleRun(run)
+                if (index < runs.lastIndex && gap > 0L) {
+                    delay(gap)
+                }
+            }
         }
     }
 
@@ -197,20 +202,25 @@ class ChatCuePlayer(context: Context) : TextToSpeech.OnInitListener {
     private suspend fun speakRuns(runs: List<AgentReplyParts.SpeechRun>) {
         if (!ready) return
         for (run in runs) {
-            val preferred = if (run.language == "ru") russianVoice else englishVoice
-            applyVoice(run.language, preferred)
-            val id = "ahcc-reply-${System.nanoTime()}"
-            val done = CompletableDeferred<Unit>()
-            utteranceId = id
-            utteranceWait = done
-            val queued = tts.speak(run.text, TextToSpeech.QUEUE_FLUSH, null, id)
-            if (queued == TextToSpeech.ERROR) {
-                utteranceWait = null
-                continue
-            }
-            withTimeoutOrNull(120_000) { done.await() }
-            if (utteranceId == id) utteranceWait = null
+            speakSingleRun(run)
         }
+    }
+
+    private suspend fun speakSingleRun(run: AgentReplyParts.SpeechRun) {
+        if (!ready) return
+        val preferred = if (run.language == "ru") russianVoice else englishVoice
+        applyVoice(run.language, preferred)
+        val id = "ahcc-reply-${System.nanoTime()}"
+        val done = CompletableDeferred<Unit>()
+        utteranceId = id
+        utteranceWait = done
+        val queued = tts.speak(run.text, TextToSpeech.QUEUE_FLUSH, null, id)
+        if (queued == TextToSpeech.ERROR) {
+            utteranceWait = null
+            return
+        }
+        withTimeoutOrNull(120_000) { done.await() }
+        if (utteranceId == id) utteranceWait = null
     }
 
     private fun finishUtterance(id: String?) {

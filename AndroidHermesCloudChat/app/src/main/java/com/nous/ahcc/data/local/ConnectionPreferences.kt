@@ -12,6 +12,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.nous.ahcc.config.HermesConfig
 import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.ConnectionConfig
+import com.nous.ahcc.domain.model.FlashcardDisplaySettings
 import com.nous.ahcc.domain.model.TransportMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -44,11 +45,35 @@ class ConnectionPreferences(private val context: Context) {
         val ttsFavoriteVoices = stringSetPreferencesKey("tts_favorite_voices")
         val localTranscription = booleanPreferencesKey("local_transcription")
         val addresseeCatalogJson = stringPreferencesKey("addressee_catalog_json")
+        val defaultAddresseeId = stringPreferencesKey("default_addressee_id")
+        val flashcardEnglishSp = intPreferencesKey("flashcard_en_sp")
+        val flashcardRussianSp = intPreferencesKey("flashcard_ru_sp")
+        val flashcardEnglishColor = intPreferencesKey("flashcard_en_color")
+        val flashcardRussianColor = intPreferencesKey("flashcard_ru_color")
+        val flashcardBackground = intPreferencesKey("flashcard_bg_color")
+        val flashcardBlankAfterSec = intPreferencesKey("flashcard_blank_after_sec")
+        val flashcardSpeechPauseSec = intPreferencesKey("flashcard_speech_pause_sec")
+        val flashcardEnTopPad = intPreferencesKey("flashcard_en_top_pad")
+        val flashcardEnRuGap = intPreferencesKey("flashcard_en_ru_gap")
+        val flashcardRuSmallerPct = intPreferencesKey("flashcard_ru_smaller_pct")
     }
 
-    val addresseeCatalogFlow: Flow<List<Addressee>> = context.dataStore.data.map { prefs ->
-        Addressee.decodeCatalog(prefs[Keys.addresseeCatalogJson]).ifEmpty { Addressee.defaultCatalog }
+    data class AddresseeSettings(
+        val catalog: List<Addressee>,
+        val defaultAddresseeId: String,
+    )
+
+    val addresseeSettingsFlow: Flow<AddresseeSettings> = context.dataStore.data.map { prefs ->
+        val catalog = Addressee.decodeCatalog(prefs[Keys.addresseeCatalogJson]).ifEmpty { Addressee.defaultCatalog }
+        val storedDefault = prefs[Keys.defaultAddresseeId]?.let { id ->
+            if (id == "liaison") Addressee.MAIN_AGENT_ID else id
+        }
+        val defaultId = storedDefault?.takeIf { id -> catalog.any { it.id == id } }
+            ?: Addressee.MAIN_AGENT_ID
+        AddresseeSettings(catalog = catalog, defaultAddresseeId = defaultId)
     }
+
+    val addresseeCatalogFlow: Flow<List<Addressee>> = addresseeSettingsFlow.map { it.catalog }
 
     suspend fun saveAddresseeCatalog(list: List<Addressee>) {
         context.dataStore.edit { prefs ->
@@ -70,15 +95,37 @@ class ConnectionPreferences(private val context: Context) {
     }
 
     suspend fun removeAddressee(id: String): List<Addressee> {
-        if (id == Addressee.LIAISON_ID) return readAddresseeCatalog()
+        if (id == Addressee.MAIN_AGENT_ID) return readAddresseeCatalog()
+        val prefs = context.dataStore.data.first()
+        if (prefs[Keys.defaultAddresseeId] == id) {
+            setDefaultAddresseeId(Addressee.MAIN_AGENT_ID)
+        }
         val next = readAddresseeCatalog().filterNot { it.id == id }
-        val normalized = if (next.any { it.id == Addressee.LIAISON_ID }) {
+        val normalized = if (next.any { it.id == Addressee.MAIN_AGENT_ID }) {
             next
         } else {
             Addressee.defaultCatalog
         }
         saveAddresseeCatalog(normalized)
         return normalized
+    }
+
+    suspend fun setDefaultAddresseeId(id: String) {
+        val catalog = readAddresseeCatalog()
+        val resolved = id.takeIf { candidate -> catalog.any { it.id == candidate } } ?: Addressee.MAIN_AGENT_ID
+        context.dataStore.edit { prefs ->
+            prefs[Keys.defaultAddresseeId] = resolved
+        }
+    }
+
+    suspend fun readDefaultAddressee(catalog: List<Addressee>): Addressee {
+        val prefs = context.dataStore.data.first()
+        val stored = prefs[Keys.defaultAddresseeId]?.let { raw ->
+            if (raw == "liaison") Addressee.MAIN_AGENT_ID else raw
+        }
+        val id = stored?.takeIf { candidate -> catalog.any { it.id == candidate } }
+            ?: Addressee.MAIN_AGENT_ID
+        return catalog.find { it.id == id } ?: Addressee.MAIN_AGENT
     }
 
     data class TelegramTarget(val botToken: String, val chatId: String)
@@ -101,6 +148,39 @@ class ConnectionPreferences(private val context: Context) {
 
     val localTranscriptionFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
         prefs[Keys.localTranscription] ?: false
+    }
+
+    val flashcardDisplayFlow: Flow<FlashcardDisplaySettings> = context.dataStore.data.map { prefs ->
+        FlashcardDisplaySettings(
+            englishSp = prefs[Keys.flashcardEnglishSp] ?: 32,
+            russianSp = prefs[Keys.flashcardRussianSp] ?: 22,
+            englishColorArgb = prefs[Keys.flashcardEnglishColor]
+                ?: FlashcardDisplaySettings().englishColorArgb,
+            russianColorArgb = prefs[Keys.flashcardRussianColor]
+                ?: FlashcardDisplaySettings().russianColorArgb,
+            backgroundArgb = prefs[Keys.flashcardBackground]
+                ?: FlashcardDisplaySettings().backgroundArgb,
+            blankAfterSeconds = prefs[Keys.flashcardBlankAfterSec] ?: 60,
+            speechPauseSeconds = prefs[Keys.flashcardSpeechPauseSec] ?: 3,
+            englishTopPaddingDp = prefs[Keys.flashcardEnTopPad] ?: 8,
+            enRuGapDp = prefs[Keys.flashcardEnRuGap] ?: 24,
+            russianSmallerPercent = prefs[Keys.flashcardRuSmallerPct] ?: 31,
+        )
+    }
+
+    suspend fun saveFlashcardDisplay(settings: FlashcardDisplaySettings) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.flashcardEnglishSp] = settings.englishSp.coerceIn(18, 72)
+            prefs[Keys.flashcardRussianSp] = settings.russianSp.coerceIn(14, 48)
+            prefs[Keys.flashcardEnglishColor] = settings.englishColorArgb
+            prefs[Keys.flashcardRussianColor] = settings.russianColorArgb
+            prefs[Keys.flashcardBackground] = settings.backgroundArgb
+            prefs[Keys.flashcardBlankAfterSec] = settings.blankAfterSeconds.coerceIn(5, 300)
+            prefs[Keys.flashcardSpeechPauseSec] = settings.speechPauseSeconds.coerceIn(0, 15)
+            prefs[Keys.flashcardEnTopPad] = settings.englishTopPaddingDp.coerceIn(0, 160)
+            prefs[Keys.flashcardEnRuGap] = settings.enRuGapDp.coerceIn(0, 120)
+            prefs[Keys.flashcardRuSmallerPct] = settings.russianSmallerPercent.coerceIn(10, 55)
+        }
     }
 
     suspend fun saveLocalTranscription(enabled: Boolean) {

@@ -81,7 +81,8 @@ class HeadsetButtonPreferences(context: Context) {
 
     companion object {
         const val DEFAULT_DEBOUNCE_MS = 500L
-        const val DEFAULT_NEXT_DOUBLE_TAP_MS = 400L
+        /** Gap / settle for 2×→Next and 3×→Stop; 400ms was too tight for triple on buds. */
+        const val DEFAULT_NEXT_DOUBLE_TAP_MS = 650L
         const val MIN_INTERVAL_MS = 50L
         const val MAX_INTERVAL_MS = 5_000L
         const val DEFAULT_MULTIPLICITY_WINDOW_MS = 2_000L

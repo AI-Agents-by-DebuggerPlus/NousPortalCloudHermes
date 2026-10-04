@@ -10,6 +10,10 @@ object AgentReplyParts {
     data class Split(val answer: String, val tools: List<String>)
 
     fun split(raw: String): Split {
+        // Memory pending / review dumps mention /opt/ and python — keep as answer, not tools.
+        if (MemoryReviewNotification.isNotification(raw)) {
+            return Split(answer = raw.trim(), tools = emptyList())
+        }
         val answer = mutableListOf<String>()
         val tools = mutableListOf<String>()
         raw.lines().forEach { line ->
@@ -185,7 +189,15 @@ object AgentReplyParts {
             words.equals("pc", ignoreCase = true)
     }
 
-    fun containsAnswer(raw: String): Boolean = forSpeech(split(raw).answer).isNotBlank()
+    fun containsAnswer(raw: String): Boolean {
+        if (MemoryReviewNotification.isNotification(raw)) return true
+        if (forSpeech(split(raw).answer).isNotBlank()) return true
+        if (lastFlashcard(raw) != null) return true
+        return split(raw).answer.lines().any { line ->
+            val text = line.trim()
+            text.isNotEmpty() && !isToolLine(text) && !isSpeechHeading(text)
+        }
+    }
 
     /** Hermes status card: "Self-improvement review: Memory updated" and similar stamps. */
     private fun isStatusStamp(text: String): Boolean = statusStamp.containsMatchIn(text)
@@ -231,20 +243,33 @@ object AgentReplyParts {
     fun isOwnEcho(text: String): Boolean =
         text.matches(Regex("""Голосовое сообщение \(\d+ ms\)"""))
 
-    fun isToolLine(line: String): Boolean =
-        line.equals("shell", ignoreCase = true) ||
-            line.equals("terminal", ignoreCase = true) ||
-            line.startsWith("tool_") ||
-            line.startsWith("cd ") ||
-            line.startsWith("which ") ||
-            line.startsWith("grep ") ||
-            line.startsWith("find ") ||
-            line.startsWith("env ") ||
-            line.startsWith("cat ") ||
-            line.startsWith("pip ") ||
-            line.contains("python3") ||
-            line.contains("/opt/") ||
-            line.startsWith("Reading skill", ignoreCase = true)
+    fun isToolLine(line: String): Boolean {
+        val text = line.trim()
+        if (text.equals("shell", ignoreCase = true) ||
+            text.equals("terminal", ignoreCase = true) ||
+            text.startsWith("tool_") ||
+            text.startsWith("Reading skill", ignoreCase = true)
+        ) {
+            return true
+        }
+        // Shell cards are short command lines. Long prose that merely mentions
+        // /opt/ or python3 (memory pending dumps) must stay in the chat answer.
+        if (text.startsWith("cd ") ||
+            text.startsWith("which ") ||
+            text.startsWith("grep ") ||
+            text.startsWith("find ") ||
+            text.startsWith("env ") ||
+            text.startsWith("cat ") ||
+            text.startsWith("pip ") ||
+            text.startsWith("timeout ") ||
+            text.startsWith("python3 ") ||
+            text.startsWith("python ") ||
+            text.startsWith("/opt/")
+        ) {
+            return true
+        }
+        return false
+    }
 
     private val statusStamp = Regex(
         """(?i)self-improvement|memory updated|reading skill|skill loaded|memory saved|interrupting current task|i'll respond to your message shortly"""

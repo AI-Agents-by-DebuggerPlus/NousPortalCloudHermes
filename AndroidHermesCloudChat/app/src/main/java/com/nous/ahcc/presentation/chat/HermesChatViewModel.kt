@@ -13,6 +13,8 @@ import com.nous.ahcc.data.local.ChatToolLog
 import com.nous.ahcc.data.local.ConnectionPreferences
 import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.AgentReplyParts
+import com.nous.ahcc.domain.model.MemoryReviewNotification
+import com.nous.ahcc.domain.model.MemoryReviewSummarizer
 import com.nous.ahcc.domain.model.ChatAttachment
 import com.nous.ahcc.domain.model.ChatMessage
 import com.nous.ahcc.domain.model.ConnectionConfig
@@ -73,9 +75,18 @@ data class ChatUiState(
     val flashcardCards: List<PhoneFlashcard> = emptyList(),
     val flashcardIndex: Int = 0,
     val flashcardBlanked: Boolean = true,
+    val flashcardDisplay: com.nous.ahcc.domain.model.FlashcardDisplaySettings =
+        com.nous.ahcc.domain.model.FlashcardDisplaySettings(),
     val playTapTestActive: Boolean = false,
     val currentAddressee: Addressee = Addressee.default,
+    val defaultAddressee: Addressee = Addressee.default,
     val addressees: List<Addressee> = Addressee.defaultCatalog,
+    /** TDLib user session (MTProto), required to send to the bot. */
+    val telegramUserReady: Boolean = false,
+    /** Full-screen memory / self-improvement approval notice from Hermes. */
+    val memoryReviewOverlay: MemoryReviewOverlayState? = null,
+    /** Auto-approve subsequent memory review notices; bot replies still appear in chat. */
+    val memoryGlobalAutoApprove: Boolean = false,
 )
 
 data class PhoneFlashcard(val en: String, val ru: String)
@@ -101,6 +112,8 @@ class HermesChatViewModel(
     private var loggedTools: List<String> = emptyList()
     private var pendingAssistantId: String? = null
     private val spokenFlashcards = LinkedHashSet<String>()
+    private var addresseeSelectionInitialized = false
+    private var lastMemoryOverlayKey: String? = null
 
     private fun watchFlashcardsForSpeech() {
         viewModelScope.launch {
@@ -145,6 +158,7 @@ class HermesChatViewModel(
     }
 
     private fun onTelegramFlashcard(text: String) {
+        maybeShowMemoryReviewOverlay(text)
         ingestFlashcardControl(text)
         val answer = AgentReplyParts.split(text).answer.ifBlank { text.trim() }
         if (answer.isBlank()) return
@@ -168,7 +182,11 @@ class HermesChatViewModel(
         }
         Log.i(TAG, "flashcard speak enChars=${card.en.length} ruChars=${card.ru.length}")
         rememberFlashcard(card)
-        cues.speakFlashcard(card.en, card.ru)
+        cues.speakFlashcard(
+            card.en,
+            card.ru,
+            pauseMs = _uiState.value.flashcardDisplay.speechPauseSeconds * 1_000L,
+        )
         return true
     }
 
@@ -184,31 +202,40 @@ class HermesChatViewModel(
     private fun rememberFlashcard(card: AgentReplyParts.Flashcard) {
         _uiState.update { state ->
             val line = PhoneFlashcard(card.en, card.ru)
-            val cards = if (state.flashcardCards.any { it.en == line.en && it.ru == line.ru }) {
-                state.flashcardCards
-            } else {
-                state.flashcardCards + line
-            }
+            val duplicate = state.flashcardCards.any { it.en == line.en && it.ru == line.ru }
+            val cards = if (duplicate) state.flashcardCards else state.flashcardCards + line
             state.copy(
                 flashcardsActive = true,
                 flashcardCards = cards,
-                flashcardIndex = cards.lastIndex.coerceAtLeast(0),
-                flashcardBlanked = true,
+                flashcardIndex = if (duplicate) state.flashcardIndex else cards.lastIndex.coerceAtLeast(0),
+                flashcardBlanked = if (duplicate) state.flashcardBlanked else false,
             )
         }
     }
 
     private fun onFlashcardPlay(taps: Int) {
         when (taps) {
-            1 -> _uiState.update { it.copy(flashcardBlanked = false) }
-            2 -> _uiState.update { state ->
-                val last = (state.flashcardCards.size - 1).coerceAtLeast(0)
-                state.copy(
-                    flashcardIndex = (state.flashcardIndex + 1).coerceAtMost(last),
-                    flashcardBlanked = false,
-                )
+            1 -> revealFlashcard()
+            2 -> {
+                cues.speak("Next")
+                blankFlashcards()
+                val seen = _uiState.value.flashcardCards
+                    .map { it.en.trim() }
+                    .filter { it.isNotEmpty() }
+                    .distinct()
+                val prompt = buildString {
+                    append("next")
+                    if (seen.isNotEmpty()) {
+                        append("\nDo not repeat these English lemmas: ")
+                        append(seen.joinToString(", "))
+                    }
+                }
+                sendPrompt(prompt)
             }
-            else -> exitFlashcards(sendStop = true)
+            else -> {
+                cues.speak("stop flashcards")
+                exitFlashcards(sendStop = true, stopText = "stop_flashcards")
+            }
         }
     }
 
@@ -218,32 +245,253 @@ class HermesChatViewModel(
         }
     }
 
+    fun revealFlashcard() {
+        _uiState.update { state ->
+            if (state.flashcardsActive) state.copy(flashcardBlanked = false) else state
+        }
+        replayCurrentFlashcardSpeech()
+    }
+
+    fun replayCurrentFlashcardSpeech() {
+        val card = _uiState.value.flashcardCards.getOrNull(_uiState.value.flashcardIndex) ?: return
+        val pauseMs = _uiState.value.flashcardDisplay.speechPauseSeconds * 1_000L
+        cues.speakFlashcard(card.en, card.ru, pauseMs = pauseMs)
+    }
+
+    fun updateFlashcardDisplay(settings: com.nous.ahcc.domain.model.FlashcardDisplaySettings) {
+        _uiState.update { it.copy(flashcardDisplay = settings) }
+        viewModelScope.launch { preferences.saveFlashcardDisplay(settings) }
+    }
+
     fun leaveFlashcards() {
         exitFlashcards(sendStop = false)
     }
 
-    private fun exitFlashcards(sendStop: Boolean) {
+    private fun exitFlashcards(sendStop: Boolean, stopText: String = "останови карточки") {
         val wasActive = _uiState.value.flashcardsActive
         _uiState.update { it.copy(flashcardsActive = false, flashcardBlanked = true) }
         if (sendStop && wasActive) {
-            sendPrompt("останови карточки")
+            sendPrompt(stopText)
         }
     }
 
     fun enterPlayTapTest() {
         app.headsetHub.playTestActive = true
+        app.headsetHub.btTestActive = false
         app.headsetHub.voiceGesturesEnabled = false
-        recordToken++
-        silenceWatchJob?.cancel()
-        silenceWatchJob = null
-        if (voiceRecorder.isRecording) voiceRecorder.cancel()
-        transcriber.cancel()
+        abortVoiceForButtonTest("play tap test")
         _uiState.update { it.copy(playTapTestActive = true, isRecording = false) }
     }
 
     fun leavePlayTapTest() {
         app.headsetHub.playTestActive = false
         _uiState.update { it.copy(playTapTestActive = false) }
+    }
+
+    fun enterBluetoothTest() {
+        app.headsetHub.btTestActive = true
+        app.headsetHub.voiceGesturesEnabled = false
+        abortVoiceForButtonTest("BT button test")
+        _uiState.update { it.copy(isRecording = false) }
+    }
+
+    fun leaveBluetoothTest() {
+        app.headsetHub.btTestActive = false
+    }
+
+    private fun abortVoiceForButtonTest(reason: String) {
+        recordToken++
+        silenceWatchJob?.cancel()
+        silenceWatchJob = null
+        if (voiceRecorder.isRecording) voiceRecorder.cancel()
+        transcriber.cancel()
+        Log.i(TAG, "voice aborted — $reason")
+    }
+
+    private fun isButtonTestScreen(): Boolean =
+        app.headsetHub.suppressChatVoice || _uiState.value.playTapTestActive
+
+    fun dismissMemoryReviewOverlay() {
+        _uiState.update { it.copy(memoryReviewOverlay = null) }
+    }
+
+    fun memoryReviewApplyCurrent() = runMemorySlashWorkflow("/memory approve (one)") {
+        memoryApproveOrRejectCurrent(approve = true)
+    }
+
+    fun memoryReviewDenyCurrent() = runMemorySlashWorkflow("/memory reject (one)") {
+        _uiState.update { it.copy(memoryGlobalAutoApprove = false) }
+        memoryApproveOrRejectCurrent(approve = false)
+    }
+
+    fun memoryReviewApplyAllSequential() = runMemorySlashWorkflow("/memory approve (each)") {
+        memoryApproveOrRejectEach(approve = true, fromCurrent = true)
+        dismissMemoryReviewOverlay()
+    }
+
+    fun memoryReviewDenyAllSequential() = runMemorySlashWorkflow("/memory reject all") {
+        _uiState.update { it.copy(memoryGlobalAutoApprove = false) }
+        memoryRejectAllPending()
+        dismissMemoryReviewOverlay()
+    }
+
+    fun memoryReviewGlobalApplyAll() = runMemorySlashWorkflow("/memory global approve") {
+        _uiState.update { it.copy(memoryGlobalAutoApprove = true) }
+        memoryApproveOrRejectEach(approve = true, fromCurrent = true)
+        dismissMemoryReviewOverlay()
+    }
+
+    private suspend fun memoryApproveOrRejectCurrent(approve: Boolean) {
+        val id = resolveNextMemoryId() ?: run {
+            showUserReply("No pending memory id for this notice.", done = true)
+            dismissMemoryReviewOverlay()
+            return
+        }
+        val cmd = if (approve) "/memory approve $id" else "/memory reject $id"
+        val reply = app.telegramUser.sendTextAndWaitReply(
+            text = cmd,
+            botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME,
+        ) { partial -> showUserReply(partial, done = false) }
+        showUserReply(reply, done = true)
+        advanceMemoryOverlayAfterAction()
+    }
+
+    private suspend fun memoryApproveOrRejectEach(approve: Boolean, fromCurrent: Boolean) {
+        val ids = resolveRemainingMemoryIds(fromCurrent)
+        memoryApproveOrRejectIds(ids, approve)
+    }
+
+    private suspend fun memoryRejectAllPending() {
+        val reply = app.telegramUser.sendTextAndWaitReply(
+            text = "/memory reject all",
+            botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME,
+        ) { partial -> showUserReply(partial, done = false) }
+        showUserReply(reply, done = true)
+    }
+
+    private suspend fun memoryApproveOrRejectIds(ids: List<String>, approve: Boolean) {
+        val validIds = ids.filter { MemoryReviewNotification.isValidPendingId(it) }.distinct()
+        if (validIds.isEmpty()) {
+            if (!approve) {
+                memoryRejectAllPending()
+                return
+            }
+            showUserReply("No pending memory writes.", done = true)
+            return
+        }
+        validIds.forEachIndexed { index, id ->
+            val cmd = if (approve) "/memory approve $id" else "/memory reject $id"
+            val reply = app.telegramUser.sendTextAndWaitReply(
+                text = cmd,
+                botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME,
+            ) { partial -> showUserReply(partial, done = false) }
+            showUserReply(reply, done = index == validIds.lastIndex)
+        }
+    }
+
+    private suspend fun resolveNextMemoryId(): String? =
+        resolveRemainingMemoryIds(fromCurrent = true).firstOrNull()
+
+    private suspend fun resolveRemainingMemoryIds(fromCurrent: Boolean): List<String> {
+        val overlay = _uiState.value.memoryReviewOverlay
+        if (overlay != null && overlay.items.isNotEmpty()) {
+            val start = if (fromCurrent) overlay.currentIndex else 0
+            return overlay.items.drop(start).map { it.id }
+        }
+        val pending = app.telegramUser.sendTextAndWaitReply(
+            text = "/memory pending",
+            botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME,
+        ) { }
+        return MemoryReviewNotification.parsePendingIds(pending)
+    }
+
+    private fun advanceMemoryOverlayAfterAction() {
+        _uiState.update { state ->
+            val overlay = state.memoryReviewOverlay ?: return@update state.copy(memoryReviewOverlay = null)
+            if (overlay.items.isEmpty()) {
+                return@update state.copy(memoryReviewOverlay = null)
+            }
+            val nextIndex = overlay.currentIndex + 1
+            if (nextIndex >= overlay.items.size) {
+                state.copy(memoryReviewOverlay = null)
+            } else {
+                state.copy(memoryReviewOverlay = overlay.copy(currentIndex = nextIndex))
+            }
+        }
+    }
+
+    private fun onMemoryReviewPush(text: String) {
+        val answer = AgentReplyParts.split(text).answer.ifBlank { text.trim() }
+        if (answer.isNotBlank()) {
+            _uiState.update { state ->
+                state.copy(
+                    messages = state.messages + ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = MessageRole.Assistant,
+                        content = memoryDisplayAnswer(answer),
+                    )
+                )
+            }
+            saveIncomingReply(answer)
+        }
+        if (_uiState.value.memoryGlobalAutoApprove) {
+            val ids = MemoryReviewNotification.parsePendingItems(answer).map { it.id }
+                .ifEmpty {
+                    MemoryReviewNotification.parsePendingIds(answer)
+                }
+            if (ids.isNotEmpty()) {
+                runMemorySlashWorkflow("Global auto-approve memory") {
+                    memoryApproveOrRejectIds(ids, approve = true)
+                }
+            }
+            return
+        }
+        maybeShowMemoryReviewOverlay(text)
+    }
+
+    private fun memoryDisplayAnswer(answer: String): String {
+        if (MemoryReviewNotification.isNotification(answer)) {
+            return MemoryReviewSummarizer.summarizeBody(answer)
+        }
+        MemoryReviewSummarizer.summarizeMemoryReply(answer)?.let { return it }
+        return answer
+    }
+
+    private fun maybeShowMemoryReviewOverlay(raw: String) {
+        val body = AgentReplyParts.split(raw).answer.ifBlank { raw.trim() }
+        if (!MemoryReviewNotification.isNotification(body)) return
+        val key = body
+        if (key == lastMemoryOverlayKey && _uiState.value.memoryReviewOverlay != null) return
+        lastMemoryOverlayKey = key
+        val items = MemoryReviewNotification.parsePendingItems(body)
+        _uiState.update {
+            it.copy(
+                memoryReviewOverlay = MemoryReviewOverlayState(
+                    body = body,
+                    items = items,
+                ),
+            )
+        }
+    }
+
+    private fun runMemorySlashWorkflow(label: String, block: suspend () -> Unit) {
+        if (!app.telegramUser.isReady) {
+            _uiState.update { it.copy(lastError = "Войдите в Telegram как пользователь: Настройки") }
+            return
+        }
+        if (sendInFlight.get() || _uiState.value.isSending) {
+            _uiState.update { it.copy(statusNotice = "Дождитесь ответа Hermes, затем повторите") }
+            return
+        }
+        beginSend(
+            userMessage = ChatMessage(
+                id = UUID.randomUUID().toString(),
+                role = MessageRole.User,
+                content = label,
+            )
+        ) {
+            block()
+        }
     }
 
     private fun flashcardKey(card: AgentReplyParts.Flashcard) = "${card.en}\n${card.ru}"
@@ -280,6 +528,7 @@ class HermesChatViewModel(
         }
         headsetAnnouncer.start()
         app.telegramUser.onIdleMessage = { text -> onTelegramFlashcard(text) }
+        app.telegramUser.onMemoryReviewMessage = { text -> onMemoryReviewPush(text) }
         watchFlashcardsForSpeech()
         viewModelScope.launch {
             preferences.localTranscriptionFlow.collect { enabled ->
@@ -287,11 +536,25 @@ class HermesChatViewModel(
             }
         }
         viewModelScope.launch {
-            preferences.addresseeCatalogFlow.collect { list ->
+            preferences.flashcardDisplayFlow.collect { display ->
+                _uiState.update { it.copy(flashcardDisplay = display) }
+            }
+        }
+        viewModelScope.launch {
+            preferences.addresseeSettingsFlow.collect { settings ->
+                val default = Addressee.resolve(settings.catalog, settings.defaultAddresseeId)
                 _uiState.update { state ->
-                    val current = state.currentAddressee
-                    val resolved = list.find { it.id == current.id } ?: Addressee.default
-                    state.copy(addressees = list, currentAddressee = resolved)
+                    val current = if (!addresseeSelectionInitialized) {
+                        addresseeSelectionInitialized = true
+                        default
+                    } else {
+                        settings.catalog.find { it.id == state.currentAddressee.id } ?: default
+                    }
+                    state.copy(
+                        addressees = settings.catalog,
+                        defaultAddressee = default,
+                        currentAddressee = current,
+                    )
                 }
             }
         }
@@ -300,6 +563,13 @@ class HermesChatViewModel(
                 _uiState.update { it.copy(connectionState = state) }
                 if (state == ConnectionState.Connected) {
                     ensureHeadsetCapture()
+                }
+            }
+        }
+        viewModelScope.launch {
+            app.telegramUser.auth.collect { auth ->
+                _uiState.update {
+                    it.copy(telegramUserReady = auth is com.nous.ahcc.data.telegram.TelegramUserAuth.Ready)
                 }
             }
         }
@@ -327,7 +597,7 @@ class HermesChatViewModel(
 
     fun claimHeadsetButtons() {
         HeadsetMonitorService.reassert(getApplication())
-        if (app.headsetHub.playTestActive) {
+        if (app.headsetHub.playTestActive || app.headsetHub.btTestActive) {
             app.headsetHub.voiceGesturesEnabled = false
             return
         }
@@ -339,7 +609,7 @@ class HermesChatViewModel(
     }
 
     private fun onHeadsetEvent(event: HeadsetButtonEvent) {
-        if (app.headsetHub.playTestActive || _uiState.value.playTapTestActive) return
+        if (isButtonTestScreen()) return
         val play = event.tapCount > 1 ||
             event.label.equals("Play", ignoreCase = true) ||
             event.label.equals("HeadsetHook", ignoreCase = true) ||
@@ -364,6 +634,18 @@ class HermesChatViewModel(
         _uiState.update { it.copy(currentAddressee = addressee) }
     }
 
+    fun setDefaultAddressee(addressee: Addressee) {
+        viewModelScope.launch {
+            preferences.setDefaultAddresseeId(addressee.id)
+            _uiState.update {
+                it.copy(
+                    defaultAddressee = addressee,
+                    statusNotice = "${addressee.displayName} is default",
+                )
+            }
+        }
+    }
+
     fun deleteCurrentAddressee() {
         val current = _uiState.value.currentAddressee
         if (current.id == Addressee.LIAISON_ID) {
@@ -372,10 +654,11 @@ class HermesChatViewModel(
         }
         viewModelScope.launch {
             val next = preferences.removeAddressee(current.id)
+            val fallback = _uiState.value.defaultAddressee
             _uiState.update {
                 it.copy(
                     addressees = next,
-                    currentAddressee = Addressee.default,
+                    currentAddressee = Addressee.resolve(next, fallback.id),
                     statusNotice = "Receiver deleted",
                 )
             }
@@ -401,12 +684,21 @@ class HermesChatViewModel(
         }
     }
 
-    private fun wireForAgent(text: String): String =
-        Addressee.wireText(text, _uiState.value.currentAddressee)
+    private fun wireForAgent(text: String): String {
+        val body = text.trim()
+        // Slash memory/session commands must go to Hermes bot as-is (no TO: routing).
+        if (body.startsWith("/memory", ignoreCase = true) ||
+            body.startsWith("/new", ignoreCase = true)
+        ) {
+            return body
+        }
+        return Addressee.wireText(body, _uiState.value.currentAddressee)
+    }
 
     private fun maybeResetAddresseeAfterSend(userText: String) {
         if (Addressee.isSessionEndCommand(userText)) {
-            _uiState.update { it.copy(currentAddressee = Addressee.default) }
+            val default = _uiState.value.defaultAddressee
+            _uiState.update { it.copy(currentAddressee = default) }
         }
     }
 
@@ -419,6 +711,7 @@ class HermesChatViewModel(
     fun connect(forceNewSession: Boolean = false) {
         val config = _uiState.value.config
         viewModelScope.launch {
+            sendInFlight.set(false)
             _uiState.update { it.copy(messages = emptyList(), lastError = null, isSending = false) }
             try {
                 val sb = AhccSupabaseClient(config.supabaseUrl, config.supabaseAnonKey)
@@ -506,8 +799,9 @@ class HermesChatViewModel(
     }
 
     fun sendPrompt(userPrompt: String = _uiState.value.draft.trim()) {
-        if (app.headsetHub.playTestActive || _uiState.value.playTapTestActive) {
-            Log.i(TAG, "send blocked — play test screen")
+        if (isButtonTestScreen()) {
+            Log.i(TAG, "send blocked — button test screen")
+            _uiState.update { it.copy(statusNotice = "Отправка отключена на экране теста кнопок") }
             return
         }
         if (userPrompt.isBlank()) return
@@ -517,6 +811,11 @@ class HermesChatViewModel(
         }
         if (!app.telegramUser.isReady) {
             _uiState.update { it.copy(lastError = "Войдите в Telegram как пользователь: Настройки") }
+            return
+        }
+        if (sendInFlight.get() || _uiState.value.isSending) {
+            Log.i(TAG, "send blocked — waiting for Hermes reply")
+            _uiState.update { it.copy(statusNotice = "Ждём ответ Hermes… (до 3 мин)") }
             return
         }
         beginSend(
@@ -547,8 +846,8 @@ class HermesChatViewModel(
 
     /** BT Play: start recording. A second Play stops and sends. */
     fun onVoicePlayPressed() {
-        if (app.headsetHub.playTestActive || _uiState.value.playTapTestActive) {
-            Log.i(TAG, "Play ignored — tap test screen")
+        if (isButtonTestScreen()) {
+            Log.i(TAG, "Play ignored — button test screen")
             return
         }
         if (!app.telegramUser.isReady) {
@@ -642,13 +941,13 @@ class HermesChatViewModel(
     }
 
     private fun stopVoiceAndSend(notice: String = "Аудиофайл отправлен") {
-        if (app.headsetHub.playTestActive || _uiState.value.playTapTestActive) {
+        if (isButtonTestScreen()) {
             recordToken++
             silenceWatchJob?.cancel()
             silenceWatchJob = null
             voiceRecorder.cancel()
             _uiState.update { it.copy(isRecording = false) }
-            Log.i(TAG, "voice send blocked — play test screen")
+            Log.i(TAG, "voice send blocked — button test screen")
             return
         }
         recordToken++
@@ -926,30 +1225,35 @@ class HermesChatViewModel(
     private fun showUserReply(reply: String, done: Boolean = true) {
         val split = AgentReplyParts.split(reply)
         if (split.tools.isNotEmpty()) recordTools(split.tools)
-        val answer = split.answer
-        val speech = AgentReplyParts.forSpeech(answer)
-        val typing = !done && speech.isEmpty()
+        val answer = split.answer.ifBlank { reply.trim() }
+        val isMemory = MemoryReviewNotification.isNotification(reply) ||
+            MemoryReviewNotification.isNotification(answer)
+        val displayAnswer = memoryDisplayAnswer(answer)
+        // Don't TTS raw pending dumps; show RU summary in the bubble instead.
+        val speech = if (isMemory) "" else AgentReplyParts.forSpeech(answer)
+        val typing = !done && speech.isEmpty() && !isMemory
         val targetId = pendingAssistantId
         _uiState.update { state ->
             val existing = state.messages.any { it.id == targetId }
             val updated = if (targetId != null && existing) {
                 state.messages.map { msg ->
                     if (msg.id != targetId) msg
-                    else if (answer.isNotEmpty()) msg.copy(content = answer, isStreaming = typing, role = MessageRole.Assistant)
-                    else if (!typing) msg.copy(isStreaming = false)
+                    else if (displayAnswer.isNotEmpty()) {
+                        msg.copy(content = displayAnswer, isStreaming = typing, role = MessageRole.Assistant)
+                    } else if (!typing) msg.copy(isStreaming = false)
                     else msg
                 }
-            } else if (answer.isNotEmpty()) {
+            } else if (displayAnswer.isNotEmpty()) {
                 state.messages + ChatMessage(
                     id = targetId ?: UUID.randomUUID().toString(),
                     role = MessageRole.Assistant,
-                    content = answer,
+                    content = displayAnswer,
                     isStreaming = typing
                 )
             } else {
                 state.messages
             }
-            state.copy(isSending = typing, messages = updated)
+            state.copy(isSending = if (done || isMemory) false else typing, messages = updated)
         }
         if (AgentReplyParts.requestsLocalTranscription(answer)) {
             if (!done) return
@@ -965,6 +1269,7 @@ class HermesChatViewModel(
         if (done) {
             pendingAssistantId = null
             saveIncomingReply(answer)
+            maybeShowMemoryReviewOverlay(answer)
             ingestFlashcardControl(answer)
             val card = AgentReplyParts.lastFlashcard(answer)
             if (card != null) {
@@ -1062,6 +1367,7 @@ class HermesChatViewModel(
     private fun beginSend(userMessage: ChatMessage, block: suspend () -> Unit) {
         if (!sendInFlight.compareAndSet(false, true)) {
             Log.w(TAG, "beginSend skipped — request already in flight")
+            _uiState.update { it.copy(statusNotice = "Уже отправляется предыдущее сообщение…") }
             return
         }
         val assistantId = UUID.randomUUID().toString()
@@ -1077,6 +1383,7 @@ class HermesChatViewModel(
         )
         _uiState.update {
             it.copy(
+                draft = if (userMessage.role == MessageRole.User) "" else it.draft,
                 isSending = true,
                 toolStatus = "",
                 messages = it.messages + userMessage + assistantPlaceholder
@@ -1105,6 +1412,9 @@ class HermesChatViewModel(
             } finally {
                 cues.stopWorkingCue()
                 sendInFlight.set(false)
+                _uiState.update { state ->
+                    if (state.isSending) state.copy(isSending = false) else state
+                }
             }
         }
     }
@@ -1301,7 +1611,55 @@ class HermesChatViewModel(
     fun clearChat() {
         chatGateway.clearHttpHistory()
         voicePlayer.stop()
-        _uiState.update { it.copy(messages = emptyList(), lastError = null, playingPath = null) }
+        synchronized(spokenFlashcards) { spokenFlashcards.clear() }
+        _uiState.update {
+            it.copy(
+                messages = emptyList(),
+                lastError = null,
+                playingPath = null,
+                statusNotice = "Очистка чата и Supabase…",
+                flashcardCards = emptyList(),
+                flashcardIndex = 0,
+                flashcardsActive = false,
+            )
+        }
+        viewModelScope.launch {
+            val cfg = _uiState.value.config
+            if (cfg.supabaseUrl.isBlank() || cfg.supabaseAnonKey.isBlank()) {
+                _uiState.update {
+                    it.copy(statusNotice = "Локальный чат очищен (Supabase не настроен)")
+                }
+                return@launch
+            }
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val sb = AhccSupabaseClient(cfg.supabaseUrl, cfg.supabaseAnonKey)
+                    try {
+                        sb.clearAllAhccData()
+                    } finally {
+                        sb.close()
+                    }
+                }
+            }
+            result.onSuccess {
+                Log.i(TAG, "clearChat: Supabase wiped")
+            }.onFailure { e ->
+                Log.e(TAG, "clearChat: Supabase wipe failed: ${e.message}", e)
+            }
+            _uiState.update { state ->
+                result.fold(
+                    onSuccess = {
+                        state.copy(statusNotice = "Чат и Supabase (ahcc_messages + ahcc_files) очищены")
+                    },
+                    onFailure = { e ->
+                        state.copy(
+                            lastError = "Локальный чат очищен, Supabase: ${e.message}",
+                            statusNotice = "Локальный чат очищен; ошибка удаления в Supabase",
+                        )
+                    },
+                )
+            }
+        }
     }
 
     fun setLocalTranscription(enabled: Boolean) {

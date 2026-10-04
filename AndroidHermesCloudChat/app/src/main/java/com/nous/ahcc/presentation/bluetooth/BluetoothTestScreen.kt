@@ -71,10 +71,14 @@ fun BluetoothTestScreen(
 
     DisposableEffect(Unit) {
         val hub = (app as AhccApp).headsetHub
+        hub.btTestActive = true
         hub.voiceGesturesEnabled = false
         HeadsetMonitorService.reassert(context)
         onDispose {
-            hub.voiceGesturesEnabled = true
+            hub.btTestActive = false
+            if (!hub.playTestActive) {
+                hub.voiceGesturesEnabled = true
+            }
         }
     }
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -131,8 +135,9 @@ fun BluetoothTestScreen(
         }
 
         Text(
-            text = "Одиночный Play → счётчик Play. Двойной Play (или жест Next на Buds) → Next. " +
-                "После Next companion Play подавляется. Поставьте на паузу Spotify/YouTube, если не ловит.",
+            text = "1× Play → Play. Жест Buds: double → Next, triple → Stop (Previous). " +
+                "Либо 2×/3× Play-Pause подряд. После Next/Stop companion Play подавляется. " +
+                "Поставьте на паузу Spotify/YouTube, если не ловит.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center
@@ -204,7 +209,7 @@ fun BluetoothTestScreen(
         OutlinedTextField(
             value = state.nextDoubleTapText,
             onValueChange = vm::onNextDoubleTapTextChange,
-            label = { Text("Интервал Next / двойного Play (мс)") },
+            label = { Text("Интервал Next/Stop / серии Play (мс)") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(
                 keyboardType = KeyboardType.Number,
@@ -227,7 +232,7 @@ fun BluetoothTestScreen(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = state.pressCount.toString(),
-                    fontSize = 56.sp,
+                    fontSize = 48.sp,
                     style = MaterialTheme.typography.displayLarge,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -239,12 +244,24 @@ fun BluetoothTestScreen(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = state.nextCount.toString(),
-                    fontSize = 56.sp,
+                    fontSize = 48.sp,
                     style = MaterialTheme.typography.displayLarge,
                     color = MaterialTheme.colorScheme.secondary
                 )
                 Text(
                     text = "Next",
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    text = state.stopCount.toString(),
+                    fontSize = 48.sp,
+                    style = MaterialTheme.typography.displayLarge,
+                    color = MaterialTheme.colorScheme.tertiary
+                )
+                Text(
+                    text = "Stop",
                     style = MaterialTheme.typography.titleMedium
                 )
             }
@@ -313,7 +330,7 @@ private fun SimulateButtons(onSimulate: (String) -> Unit) {
             Text("Симулировать Play")
         }
         Text(
-            text = "Один Play, два быстрых — DoublePlay, три — TriplePlay. Отдельная кнопка Next — аппаратный Next.",
+            text = "Симуляция: Play×3 → Stop; Next → Next; Previous/Stop → Stop.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

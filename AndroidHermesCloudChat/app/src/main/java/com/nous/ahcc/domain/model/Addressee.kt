@@ -11,12 +11,19 @@ data class Addressee(
     val displayName: String,
 ) {
     companion object {
-        const val LIAISON_ID = "liaison"
+        /** Hermes profile id / TO: key for the front-desk agent. */
+        const val MAIN_AGENT_ID = "main_agent"
 
-        val LIAISON = Addressee(LIAISON_ID, "MainAgent")
+        /** @deprecated Renamed to [MAIN_AGENT_ID]; kept for migrations. */
+        const val LIAISON_ID = MAIN_AGENT_ID
+
+        val MAIN_AGENT = Addressee(MAIN_AGENT_ID, "MainAgent")
+
+        /** @deprecated use [MAIN_AGENT] */
+        val LIAISON: Addressee get() = MAIN_AGENT
 
         val defaultCatalog: List<Addressee> = listOf(
-            LIAISON,
+            MAIN_AGENT,
             Addressee("english_tutor", "EnglishTutor"),
         )
 
@@ -25,13 +32,22 @@ data class Addressee(
 
         val predefined: List<Addressee> get() = defaultCatalog
 
-        val default: Addressee = LIAISON
+        val default: Addressee = MAIN_AGENT
+
+        fun resolve(catalog: List<Addressee>, id: String): Addressee {
+            val normalizedId = if (id == "liaison") MAIN_AGENT_ID else id
+            return catalog.find { it.id == normalizedId }
+                ?: catalog.find { it.id == MAIN_AGENT_ID }
+                ?: catalog.firstOrNull()
+                ?: MAIN_AGENT
+        }
 
         val sessionEndTriggers: Set<String> = setOf(
             "завершить",
             "закончить",
             "стоп",
             "хватит",
+            "stop_flashcards",
         )
 
         fun encodeCatalog(list: List<Addressee>): String =
@@ -55,14 +71,21 @@ data class Addressee(
             )
         }
 
-        fun normalizeCatalog(list: List<Addressee>): List<Addressee> =
-            list.map { item ->
-                if (item.id == LIAISON_ID && item.displayName.equals("Gate", ignoreCase = true)) {
-                    item.copy(displayName = LIAISON.displayName)
-                } else {
-                    item
+        fun normalizeCatalog(list: List<Addressee>): List<Addressee> {
+            val migrated = list.map { item ->
+                when {
+                    item.id == "liaison" -> item.copy(id = MAIN_AGENT_ID)
+                    item.id == MAIN_AGENT_ID && item.displayName.equals("Gate", ignoreCase = true) ->
+                        item.copy(displayName = MAIN_AGENT.displayName)
+                    else -> item
                 }
             }
+            val deduped = migrated
+                .groupBy { it.id }
+                .map { (_, group) -> group.first() }
+            val hasMain = deduped.any { it.id == MAIN_AGENT_ID }
+            return if (hasMain) deduped else listOf(MAIN_AGENT) + deduped.filter { it.id != MAIN_AGENT_ID }
+        }
 
         fun newId(displayName: String, existing: Collection<Addressee>): String {
             val base = displayName.trim().lowercase()
@@ -88,7 +111,7 @@ data class Addressee(
         fun wireText(userText: String, addressee: Addressee): String {
             val body = userText.trim()
             if (body.isEmpty()) return body
-            if (addressee.id == LIAISON_ID) return body
+            if (addressee.id == MAIN_AGENT_ID) return body
             return "TO: ${addressee.id}\n$body"
         }
     }

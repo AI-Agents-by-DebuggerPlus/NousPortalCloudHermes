@@ -1,9 +1,11 @@
 ﻿package com.nous.ahcc.data.supabase
 
+import android.util.Log
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.engine.cio.CIO
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
@@ -187,6 +189,44 @@ class AhccSupabaseClient(
         return rows.firstOrNull()
     }
 
+    /**
+     * Wipe all AHCC rows in Supabase (`ahcc_messages` + `ahcc_files`).
+     * Same filter style as AndroidAssistant2025V1 SupabaseClient.clearAllMessages().
+     * Requires RLS DELETE policies for role `anon` (see Docs/Guides/AHCC-Supabase-Sessions.md).
+     */
+    suspend fun clearAllAhccData() {
+        if (!isConfigured) throw IllegalStateException("Supabase is not configured")
+        Log.i(TAG, "clearAllAhccData: deleting ahcc_files + ahcc_messages")
+        deleteAllRows("ahcc_files")
+        deleteAllRows("ahcc_messages")
+        // RLS without DELETE policy often returns HTTP 200 and deletes 0 rows — verify.
+        val leftoverMessages = fetchRecentMessages(1)
+        if (leftoverMessages.isNotEmpty()) {
+            throw IllegalStateException(
+                "Supabase rows still present after DELETE (likely missing RLS policy " +
+                    "ahcc_messages_delete_anon / ahcc_files_delete_anon). Run SQL in Docs/Guides/AHCC-Supabase-Sessions.md"
+            )
+        }
+        Log.i(TAG, "clearAllAhccData: verified empty")
+    }
+
+    private suspend fun deleteAllRows(table: String) {
+        // PostgREST requires a WHERE clause. Mirror AndroidChat:
+        // id=neq.00000000-0000-0000-0000-000000000000
+        val res = http.delete("$root/rest/v1/$table") {
+            authHeaders()
+            header("Prefer", "return=minimal,count=exact")
+            url.parameters.append("id", "neq.$NIL_UUID")
+        }
+        val range = res.headers["Content-Range"]
+        Log.i(TAG, "delete $table status=${res.status.value} content-range=$range")
+        if (!res.status.isSuccess()) {
+            throw IllegalStateException(
+                "Supabase delete $table HTTP ${res.status.value}: ${res.bodyAsText().take(240)}"
+            )
+        }
+    }
+
     fun close() = http.close()
 
     private fun io.ktor.client.request.HttpRequestBuilder.authHeaders() {
@@ -195,6 +235,8 @@ class AhccSupabaseClient(
     }
 
     companion object {
+        private const val TAG = "AHCC-Supabase"
+        private const val NIL_UUID = "00000000-0000-0000-0000-000000000000"
         const val NEW_SESSION_CONTENT = "new session"
         const val FILE_MARKER_PREFIX = "[AHCC_FILE]"
         const val SENDER_DESKTOP = "WPF User"

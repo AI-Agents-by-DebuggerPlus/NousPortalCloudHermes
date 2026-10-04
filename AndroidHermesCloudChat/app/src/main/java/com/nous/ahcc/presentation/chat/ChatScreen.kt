@@ -295,13 +295,22 @@ fun ChatScreen(
             }
 
             val composerBusy = state.isSending || state.isRecording
+            val botConnected = state.connectionState == ConnectionState.Connected
+            val canSend = botConnected && state.telegramUserReady
             ComposerBar(
                 draft = state.draft,
-                enabled = state.connectionState == ConnectionState.Connected,
+                enabled = canSend,
+                connectHint = when {
+                    !botConnected -> "Connect first"
+                    !state.telegramUserReady -> "Telegram user login: Settings"
+                    else -> "Message... Enter to send"
+                },
                 composerBusy = composerBusy,
                 addressees = state.addressees,
                 selectedAddressee = state.currentAddressee,
+                defaultAddressee = state.defaultAddressee,
                 onAddresseeSelect = viewModel::onAddresseeSelected,
+                onSetDefaultAddressee = viewModel::setDefaultAddressee,
                 onDeleteCurrentReceiver = viewModel::deleteCurrentAddressee,
                 onAddReceiver = viewModel::addAddressee,
                 isRecording = state.isRecording,
@@ -634,6 +643,7 @@ private fun MessageBubble(
 private fun AddresseeDropdown(
     addressees: List<Addressee>,
     selected: Addressee,
+    defaultAddressee: Addressee,
     enabled: Boolean,
     onSelect: (Addressee) -> Unit,
 ) {
@@ -645,8 +655,13 @@ private fun AddresseeDropdown(
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
+        val fieldLabel = if (selected.id == defaultAddressee.id) {
+            "${selected.displayName} (default)"
+        } else {
+            selected.displayName
+        }
         OutlinedTextField(
-            value = selected.displayName,
+            value = fieldLabel,
             onValueChange = {},
             readOnly = true,
             enabled = enabled,
@@ -676,7 +691,13 @@ private fun AddresseeDropdown(
                 DropdownMenuItem(
                     text = {
                         Column {
-                            Text(addressee.displayName)
+                            Text(
+                                if (addressee.id == defaultAddressee.id) {
+                                    "${addressee.displayName} (default)"
+                                } else {
+                                    addressee.displayName
+                                },
+                            )
                             if (addressee.id != Addressee.LIAISON_ID) {
                                 Text(
                                     addressee.id,
@@ -752,10 +773,13 @@ private fun AddReceiverDialog(
 private fun ComposerBar(
     draft: String,
     enabled: Boolean,
+    connectHint: String,
     composerBusy: Boolean,
     addressees: List<Addressee>,
     selectedAddressee: Addressee,
+    defaultAddressee: Addressee,
     onAddresseeSelect: (Addressee) -> Unit,
+    onSetDefaultAddressee: (Addressee) -> Unit,
     onDeleteCurrentReceiver: () -> Unit,
     onAddReceiver: (displayName: String, addressingKey: String?) -> Unit,
     isRecording: Boolean,
@@ -778,6 +802,7 @@ private fun ComposerBar(
         AddresseeDropdown(
             addressees = addressees,
             selected = selectedAddressee,
+            defaultAddressee = defaultAddressee,
             enabled = receiverControlsEnabled,
             onSelect = onAddresseeSelect,
         )
@@ -801,6 +826,15 @@ private fun ComposerBar(
             ) {
                 Text("Add new receiver", maxLines = 1)
             }
+        }
+        OutlinedButton(
+            onClick = { onSetDefaultAddressee(selectedAddressee) },
+            enabled = receiverControlsEnabled && selectedAddressee.id != defaultAddressee.id,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+        ) {
+            Text("Set as default")
         }
         Row(
             modifier = Modifier
@@ -852,8 +886,7 @@ private fun ComposerBar(
                 enabled = enabled,
                 placeholder = {
                     Text(
-                        if (enabled) "Message... Enter to send"
-                    else "Connect first",
+                        connectHint,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 },
