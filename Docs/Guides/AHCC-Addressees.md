@@ -2,9 +2,11 @@
 
 ## Список получателей
 
-- **В чате:** dropdown «Адресат», кнопки **Delete current receiver** и **Add new receiver**.
-- Список сохраняется в DataStore на телефоне (переживает перезапуск).
-- **MainAgent** (`liaison`) — по умолчанию, удалить нельзя, строка `TO:` не добавляется.
+- **В чате (Android и AHCC Desktop):** dropdown «Адресат», кнопки **Delete current** / **Add new** / **Set default**.
+- Список сохраняется в DataStore на телефоне; на Desktop — в `~/.ahcc-desktop/ui.properties`.
+- **MainAgent** (`main_agent`) — начальный дефолт, удалить нельзя; без `TO:` только у `main_agent`.
+- Встроенные specialists: **Assistant** (`assistant`), **EnglishTutor** (`english_tutor`), **TaskScheduler** (`task_scheduler`), **BioStack** (`biostack`), **Accountant** (`accountant`), **SysAdmin** (`sysadmin`; ops/диск). SOUL: `Docs/Agents/*.SOUL.md` (`biostack` / `accountant` / `sysadmin` пока stub).
+- Кнопка **Set as default** — любой адресат может стать дефолтным (выбор при старте и после «завершить/стоп/…»).
 
 ## Ключ адресации
 
@@ -27,4 +29,4 @@ TO: <addressing_key>
 
 ## Завершение сессии с адресатом
 
-После отправки **завершить / закончить / стоп / хватит** выбор снова **MainAgent** (сообщение уходит текущему адресату, затем сброс).
+После отправки **завершить / закончить / стоп / хватит** выбор снова **дефолтный адресат** (сообщение уходит текущему адресату, затем сброс).

@@ -46,6 +46,9 @@ public sealed class ViewerSettings
     /// <summary>Poll Supabase for new messages while connected (seconds). 0 = off.</summary>
     public int PollSeconds { get; set; } = 5;
 
+    /// <summary>Blank the flashcard screen after this many idle seconds. 0 = off.</summary>
+    public int ScreenBlankSeconds { get; set; } = 60;
+
     private static string SettingsPath =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),

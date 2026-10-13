@@ -1,7 +1,8 @@
-﻿<Window x:Class="AhccDesktopViewer.MainWindow"
+<Window x:Class="AhccDesktopViewer.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="AHCC Desktop Viewer"
+        Title="AHCCDV"
+        Icon="pack://application:,,,/Assets/AhccDv.ico"
         Height="720"
         Width="980"
         MinHeight="480"
@@ -20,6 +21,7 @@
 
         <DockPanel x:Name="ChromeBar" Grid.Row="0" Margin="0,0,0,12">
             <StackPanel Orientation="Horizontal" DockPanel.Dock="Right">
+                <Button Content="Cards" Width="80" Height="32" Margin="0,0,8,0" Click="Cards_Click" />
                 <Button Content="Logs" Width="80" Height="32" Margin="0,0,8,0" Click="Logs_Click" />
                 <Button Content="Refresh" Width="90" Height="32" Margin="0,0,8,0" Click="Refresh_Click" />
                 <Button x:Name="ConnectButton" Content="Connect" Width="100" Height="32" Click="Connect_Click" />
@@ -79,6 +81,9 @@
                         <TextBlock Text="Poll interval (seconds, 0 = off)" Foreground="#8AA8A6" Margin="0,0,0,4" />
                         <TextBox x:Name="PollSecondsBox" Width="80" HorizontalAlignment="Left"
                                  Margin="0,0,0,12" Padding="8" Text="5" />
+                        <TextBlock Text="Гашение карточек (секунды, 0 = выкл)" Foreground="#8AA8A6" Margin="0,0,0,4" />
+                        <TextBox x:Name="ScreenBlankBox" Width="80" HorizontalAlignment="Left"
+                                 Margin="0,0,0,12" Padding="8" Text="60" />
                         <CheckBox x:Name="AutoConnectCheck" Content="Connect on launch"
                                   Foreground="#E8F4F3" Margin="0,0,0,12" />
                         <Button Content="Save settings" Width="140" Height="34" HorizontalAlignment="Left"
@@ -91,7 +96,7 @@
 
             <TabItem Header="Hot Keys">
                 <StackPanel Margin="0,12,0,0">
-                    <TextBlock Text="Fullscreen (chat only)" Foreground="#8AA8A6" Margin="0,0,0,4" />
+                    <TextBlock Text="Карточки на весь экран" Foreground="#8AA8A6" Margin="0,0,0,4" />
                     <StackPanel Orientation="Horizontal">
                         <TextBox x:Name="HotKeyBox" Width="80" Padding="8" MaxLength="1" />
                         <TextBlock Text="(default F — press again to exit)"

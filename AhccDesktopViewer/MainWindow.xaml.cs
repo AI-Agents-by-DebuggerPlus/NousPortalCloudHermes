@@ -35,6 +35,10 @@ public partial class MainWindow : Window
     private bool _prevTopmost;
     private AppearanceWindow? _appearanceWindow;
     private LogWindow? _logWindow;
+    private FlashcardsWindow? _flashcardsWindow;
+    private readonly List<FlashcardCard> _cards = new();
+    private string _flashcardStatus = "";
+    private int _publishedCardCount;
     private CancellationTokenSource? _connectCts;
     private DispatcherTimer? _pollTimer;
     private DispatcherTimer? _toastTimer;
@@ -63,6 +67,7 @@ public partial class MainWindow : Window
         SupabaseUrlBox.Text = _settings.SupabaseUrl;
         SupabaseKeyBox.Text = _settings.SupabaseAnonKey;
         PollSecondsBox.Text = _settings.PollSeconds.ToString();
+        ScreenBlankBox.Text = _settings.ScreenBlankSeconds.ToString();
         HotKeyBox.Text = string.IsNullOrWhiteSpace(_settings.FullscreenHotKey)
             ? "F"
             : _settings.FullscreenHotKey[..1].ToUpperInvariant();
@@ -81,6 +86,8 @@ public partial class MainWindow : Window
         _settings.AutoConnect = AutoConnectCheck.IsChecked == true;
         if (int.TryParse(PollSecondsBox.Text.Trim(), out var poll) && poll >= 0)
             _settings.PollSeconds = poll;
+        if (int.TryParse(ScreenBlankBox.Text.Trim(), out var blank) && blank >= 0)
+            _settings.ScreenBlankSeconds = blank;
     }
 
     private static string NormalizeHex(string? raw, string fallback)
@@ -272,6 +279,7 @@ public partial class MainWindow : Window
         ApplyAppearance();
         RefreshBubbleStyles();
         if (_connected) StartPoll();
+        _flashcardsWindow?.ApplyBlankSeconds(_settings.ScreenBlankSeconds);
         NotifyStatus("Settings saved");
     }
 
@@ -286,6 +294,7 @@ public partial class MainWindow : Window
         StopPoll();
         _connectCts?.Cancel();
         _logWindow?.Close();
+        _flashcardsWindow?.Close();
     }
 
     private async void Connect_Click(object sender, RoutedEventArgs e)
@@ -346,7 +355,9 @@ public partial class MainWindow : Window
 
             _connected = true;
             ConnectButton.Content = "Disconnect";
-            StatusText.Text = $"Connected · Supabase session {last}";
+            StatusText.Text = _settings.PollSeconds <= 0
+                ? $"Connected · Supabase session {last} · обновление выключено"
+                : $"Connected · Supabase session {last} · обновление каждые {_settings.PollSeconds} с";
             StartPoll();
         }
         catch (Exception ex)
@@ -371,6 +382,15 @@ public partial class MainWindow : Window
         try
         {
             using var sb = new AhccSupabaseClient(_settings.SupabaseUrl, _settings.SupabaseAnonKey);
+            var last = await sb.FetchLastSessionIdAsync();
+            if (!string.IsNullOrWhiteSpace(last) &&
+                !string.Equals(last, _settings.SessionId, StringComparison.Ordinal))
+            {
+                _settings.SessionId = last;
+                SessionIdBox.Text = last;
+                _publishedCardCount = 0;
+                AppLogger.Info($"Supabase session switched to {last}");
+            }
             await LoadHistoryIntoUiAsync(sb, _settings.SessionId, CancellationToken.None);
             StatusText.Text = $"Refreshed · session {_settings.SessionId} · {_messages.Count} items";
             ChatScroll.ScrollToEnd();
@@ -390,6 +410,8 @@ public partial class MainWindow : Window
     {
         var rows = await sb.FetchSessionMessagesAsync(sessionId, ct);
         _messages.Clear();
+        _cards.Clear();
+        _flashcardStatus = "";
         foreach (var row in rows)
         {
             if (string.Equals(row.Content, AhccSupabaseClient.NewSessionContent, StringComparison.OrdinalIgnoreCase))
@@ -405,12 +427,61 @@ public partial class MainWindow : Window
                 continue;
             }
 
+            var fromHermes = string.Equals(row.SenderName, AhccSupabaseClient.SenderHermes, StringComparison.OrdinalIgnoreCase);
+            var found = fromHermes
+                ? FlashcardMessageParser.ExtractCards(row.Content, row.CreatedAt)
+                : Array.Empty<FlashcardCard>();
+            if (found.Count > 0)
+                _cards.AddRange(found);
+            var status = "";
+            if (fromHermes && FlashcardMessageParser.TryStatus(row.Content, out status))
+                _flashcardStatus = status;
+
+            var visible = FlashcardMessageParser.WithoutCardJson(row.Content);
+            if (string.IsNullOrWhiteSpace(visible))
+            {
+                if (found.Count > 0)
+                    visible = $"Карточка: {found[^1].En}";
+                else if (!string.IsNullOrWhiteSpace(status))
+                    visible = status;
+                else
+                    continue;
+            }
+
             _messages.Add(MakeBubble(
                 string.IsNullOrWhiteSpace(row.SenderName) ? "…" : row.SenderName,
-                row.Content));
+                visible));
         }
 
-        AppLogger.Info($"Supabase history rows={rows.Count}");
+        var grew = _cards.Count > _publishedCardCount;
+        _publishedCardCount = _cards.Count;
+        PublishFlashcards(openIfNew: grew && _cards.Count > 0);
+        AppLogger.Info($"Supabase history rows={rows.Count} cards={_cards.Count}");
+    }
+
+    private void Cards_Click(object sender, RoutedEventArgs e) => PublishFlashcards(openIfNew: true);
+
+    private void PublishFlashcards(bool openIfNew)
+    {
+        if (_cards.Count == 0 && !openIfNew) return;
+        if (_flashcardsWindow == null)
+        {
+            if (!openIfNew && _cards.Count == 0) return;
+            _flashcardsWindow = new FlashcardsWindow { Owner = this };
+            _flashcardsWindow.ApplyBlankSeconds(_settings.ScreenBlankSeconds);
+            _flashcardsWindow.Closed += (_, _) => _flashcardsWindow = null;
+            if (openIfNew || _cards.Count > 0)
+                _flashcardsWindow.Show();
+        }
+        else if (openIfNew)
+        {
+            if (!_flashcardsWindow.IsVisible) _flashcardsWindow.Show();
+            _flashcardsWindow.Activate();
+        }
+
+        _flashcardsWindow?.ShowCards(_cards, string.IsNullOrWhiteSpace(_flashcardStatus)
+            ? "Команды генерации отправляет AHCC агенту Hermes."
+            : _flashcardStatus);
     }
 
     private void StartPoll()
@@ -487,13 +558,20 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (Keyboard.FocusedElement is System.Windows.Controls.TextBox) return;
         var expected = string.IsNullOrWhiteSpace(_settings.FullscreenHotKey) ? "F" : _settings.FullscreenHotKey;
         if (e.Key.ToString().Equals(expected, StringComparison.OrdinalIgnoreCase) &&
             Keyboard.Modifiers == ModifierKeys.None)
         {
-            ToggleFullscreen();
+            ToggleFlashcardsFullscreen();
             e.Handled = true;
         }
+    }
+
+    private void ToggleFlashcardsFullscreen()
+    {
+        PublishFlashcards(openIfNew: true);
+        _flashcardsWindow?.ToggleFullscreen();
     }
 
     private void ToggleFullscreen()

@@ -9,5 +9,10 @@
     <AssemblyName>AhccDesktopViewer</AssemblyName>
     <RootNamespace>AhccDesktopViewer</RootNamespace>
     <Product>AHCC Desktop Viewer</Product>
+    <AssemblyTitle>AHCCDV</AssemblyTitle>
+    <ApplicationIcon>Assets\AhccDv.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\AhccDv.ico" />
+  </ItemGroup>
 </Project>

@@ -10,10 +10,19 @@ data class ChatMessage(
     val id: String,
     val role: MessageRole,
     val content: String,
-    val isStreaming: Boolean = false
+    val isStreaming: Boolean = false,
+    /** True after a finished assistant turn (Telegram-style “delivered”). */
+    val isComplete: Boolean = false,
+    val inlineKeyboard: TelegramInlineKeyboard? = null,
+)
+
+data class TelegramReply(
+    val text: String,
+    val keyboard: TelegramInlineKeyboard? = null,
 )
 
 data class ConnectionConfig(
+    val channel: ChatChannel = ChatChannel.Telegram,
     val apiKey: String = com.nous.ahcc.desktop.config.HermesConfig.API_KEY,
     val sessionId: String = com.nous.ahcc.desktop.config.HermesConfig.SESSION_ID,
     val inferenceBaseUrl: String = com.nous.ahcc.desktop.config.HermesConfig.INFERENCE_BASE_URL,
@@ -27,6 +36,12 @@ data class ConnectionConfig(
     val supabaseUrl: String = com.nous.ahcc.desktop.config.HermesConfig.SUPABASE_URL,
     /** Supabase anon (public) key */
     val supabaseAnonKey: String = com.nous.ahcc.desktop.config.HermesConfig.SUPABASE_ANON_KEY,
+    val telegramBotToken: String = com.nous.ahcc.desktop.config.HermesConfig.TELEGRAM_BOT_TOKEN,
+    val telegramChatId: String = com.nous.ahcc.desktop.config.HermesConfig.TELEGRAM_CHAT_ID,
+    val telegramBotUsername: String = com.nous.ahcc.desktop.config.HermesConfig.TELEGRAM_BOT_USERNAME,
+    val telegramApiId: Int = com.nous.ahcc.desktop.config.HermesConfig.TELEGRAM_API_ID,
+    val telegramApiHash: String = com.nous.ahcc.desktop.config.HermesConfig.TELEGRAM_API_HASH,
+    val telegramPhone: String = com.nous.ahcc.desktop.config.HermesConfig.TELEGRAM_PHONE,
 )
 
 @kotlinx.serialization.Serializable
@@ -38,6 +53,8 @@ data class HermesResponse(
     val error: String? = null,
     /** Populated for event=history — server transcript turns as role/content pairs. */
     val history: List<HermesHistoryItem>? = null,
+    @kotlinx.serialization.Transient
+    val inlineKeyboard: TelegramInlineKeyboard? = null,
 )
 
 @kotlinx.serialization.Serializable

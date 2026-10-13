@@ -32,6 +32,10 @@ create policy "ahcc_messages_select_anon"
 
 create policy "ahcc_messages_insert_anon"
   on public.ahcc_messages for insert to anon with check (true);
+
+-- Required for AHCC Clear (wipe all chat history via anon key)
+create policy "ahcc_messages_delete_anon"
+  on public.ahcc_messages for delete to anon using (true);
 ```
 
 ### `public.ahcc_files` (md / text share)
@@ -58,7 +62,29 @@ create policy "ahcc_files_select_anon"
 
 create policy "ahcc_files_insert_anon"
   on public.ahcc_files for insert to anon with check (true);
+
+-- Required for AHCC Clear (wipe shared files via anon key)
+create policy "ahcc_files_delete_anon"
+  on public.ahcc_files for delete to anon using (true);
 ```
+
+### One-time migration (existing projects) — required for Clear
+
+Without these policies PostgREST often returns **HTTP 200** but deletes **0 rows** (RLS filters everything out). AHCC Clear then looks successful locally while Supabase still has data.
+
+Run in Supabase SQL editor:
+
+```sql
+drop policy if exists "ahcc_messages_delete_anon" on public.ahcc_messages;
+create policy "ahcc_messages_delete_anon"
+  on public.ahcc_messages for delete to anon using (true);
+
+drop policy if exists "ahcc_files_delete_anon" on public.ahcc_files;
+create policy "ahcc_files_delete_anon"
+  on public.ahcc_files for delete to anon using (true);
+```
+
+AHCC **Clear** (same idea as AndroidAssistant `clearAllMessages`): `DELETE … WHERE id <> nil-uuid` for **all** rows in `ahcc_messages` and `ahcc_files`, then verifies the table is empty.
 
 ## Semantics
 

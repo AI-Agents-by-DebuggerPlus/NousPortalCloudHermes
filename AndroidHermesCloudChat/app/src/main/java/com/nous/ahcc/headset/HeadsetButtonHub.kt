@@ -124,7 +124,10 @@ class HeadsetButtonHub(
      * multiple collectors listen to [events].
      */
     fun tryConsumeVoiceGesture(minIntervalMs: Long = 700L): Boolean {
-        if (!voiceGesturesEnabled) return false
+        if (btTestActive || playTestActive || !voiceGesturesEnabled) {
+            Log.d(TAG, "voice gesture blocked (btTest=$btTestActive playTest=$playTestActive voice=$voiceGesturesEnabled)")
+            return false
+        }
         val now = System.currentTimeMillis()
         synchronized(voiceGestureLock) {
             if (now - lastVoiceGestureConsumedAtMs < minIntervalMs) {

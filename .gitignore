@@ -37,6 +37,9 @@ secrets/
 
 # --- Local temp / session dumps (do not commit) ---
 Docs/Temp/
+Logs/ahcc-desktop/*.log
+!Logs/ahcc-desktop/.gitkeep
+
 
 # --- IDE / OS ---
 .vs/

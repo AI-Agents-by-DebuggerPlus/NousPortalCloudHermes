@@ -5,8 +5,8 @@ plugins {
     id("org.jetbrains.compose")
 }
 
-val ahccDesktopVersion = "1.2.0"
-val ahccDesktopVersionCode = 3
+val ahccDesktopVersion = "1.4.9"
+val ahccDesktopVersionCode = 16
 
 kotlin {
     jvmToolchain(21)
@@ -51,12 +51,26 @@ dependencies {
     implementation("io.ktor:ktor-client-websockets:2.3.12")
     implementation("io.ktor:ktor-client-content-negotiation:2.3.12")
     implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.12")
+
+    // Telegram user session (same channel as AHCC / TDLib)
+    implementation(platform("it.tdlight:tdlight-java-bom:3.5.4+td.1.8.66"))
+    implementation("it.tdlight:tdlight-java")
+    implementation("it.tdlight:tdlight-natives") {
+        artifact {
+            classifier = "windows_amd64"
+            extension = "jar"
+        }
+    }
 }
 
 compose.desktop {
     application {
         mainClass = "com.nous.ahcc.desktop.MainKt"
-        jvmArgs += listOf("-Dskiko.renderApi=OPENGL")
+        val repoLogs = rootProject.projectDir.parentFile.resolve("Logs").absolutePath
+        jvmArgs += listOf(
+            "-Dskiko.renderApi=OPENGL",
+            "-Dahcc.logs.dir=$repoLogs",
+        )
         nativeDistributions {
             packageName = "AHCC"
             packageVersion = ahccDesktopVersion

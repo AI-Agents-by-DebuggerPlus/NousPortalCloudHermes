@@ -13,6 +13,9 @@ import com.nous.ahcc.data.local.ChatToolLog
 import com.nous.ahcc.data.local.ConnectionPreferences
 import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.AgentReplyParts
+import com.nous.ahcc.domain.model.ContextPressure
+import com.nous.ahcc.domain.model.ContextPressureNotice
+import com.nous.ahcc.domain.model.ContextUsageParser
 import com.nous.ahcc.domain.model.MemoryReviewNotification
 import com.nous.ahcc.domain.model.MemoryReviewSummarizer
 import com.nous.ahcc.domain.model.ChatAttachment
@@ -21,7 +24,13 @@ import com.nous.ahcc.domain.model.ConnectionConfig
 import com.nous.ahcc.domain.model.ConnectionState
 import com.nous.ahcc.domain.model.MediaKind
 import com.nous.ahcc.domain.model.MessageRole
+import com.nous.ahcc.domain.model.TaskItem
+import com.nous.ahcc.domain.model.TaskListParser
+import com.nous.ahcc.domain.model.TelegramInlineAction
+import com.nous.ahcc.domain.model.TelegramInlineKeyboard
+import com.nous.ahcc.domain.model.TelegramInlineKeyboardParser
 import com.nous.ahcc.domain.model.TransportMode
+import android.content.Intent
 import com.nous.ahcc.headset.HeadsetButtonEvent
 import com.nous.ahcc.headset.HeadsetLinkAnnouncer
 import com.nous.ahcc.headset.HeadsetMonitorService
@@ -78,6 +87,8 @@ data class ChatUiState(
     val flashcardDisplay: com.nous.ahcc.domain.model.FlashcardDisplaySettings =
         com.nous.ahcc.domain.model.FlashcardDisplaySettings(),
     val playTapTestActive: Boolean = false,
+    /** «Тест BT-кнопок» — чат не должен начинать голосовую запись. */
+    val bluetoothTestActive: Boolean = false,
     val currentAddressee: Addressee = Addressee.default,
     val defaultAddressee: Addressee = Addressee.default,
     val addressees: List<Addressee> = Addressee.defaultCatalog,
@@ -87,6 +98,13 @@ data class ChatUiState(
     val memoryReviewOverlay: MemoryReviewOverlayState? = null,
     /** Auto-approve subsequent memory review notices; bot replies still appear in chat. */
     val memoryGlobalAutoApprove: Boolean = false,
+    /** Context-window pressure from Hermes footer / `/context` (null = dismiss / unknown). */
+    val contextPressure: ContextPressureNotice? = null,
+    val contextPercent: Int? = null,
+    /** Simple TaskScheduler to-do list (no due dates). */
+    val tasks: List<TaskItem> = emptyList(),
+    /** When true, nav opens the Tasks screen. */
+    val tasksScreenOpen: Boolean = false,
 )
 
 data class PhoneFlashcard(val en: String, val ru: String)
@@ -111,9 +129,16 @@ class HermesChatViewModel(
     private var spokenReply: String? = null
     private var loggedTools: List<String> = emptyList()
     private var pendingAssistantId: String? = null
+    /** Kept for the whole send so a mid-flight history reload cannot drop the "You" bubble. */
+    private var pendingUserMessage: ChatMessage? = null
     private val spokenFlashcards = LinkedHashSet<String>()
     private var addresseeSelectionInitialized = false
     private var lastMemoryOverlayKey: String? = null
+    private val runtimeFooterEnsure = AtomicBoolean(false)
+    /** After dismiss, hide banner until context % reaches this value again. */
+    private var contextNoticeDismissedUntil: Int? = null
+    /** Skip one rotate loop after AHCC itself resends into a fresh session. */
+    private var suppressSessionRotateOnce = false
 
     private fun watchFlashcardsForSpeech() {
         viewModelScope.launch {
@@ -160,19 +185,158 @@ class HermesChatViewModel(
     private fun onTelegramFlashcard(text: String) {
         maybeShowMemoryReviewOverlay(text)
         ingestFlashcardControl(text)
+        ingestContextUsage(text)
+        ingestTaskList(text, openScreen = true)
         val answer = AgentReplyParts.split(text).answer.ifBlank { text.trim() }
         if (answer.isBlank()) return
+        val keyboard = resolveInlineKeyboard(answer)
+        val display = tasksAwareDisplay(answer, keyboard)
         _uiState.update { state ->
             state.copy(
                 messages = state.messages + ChatMessage(
                     id = UUID.randomUUID().toString(),
                     role = MessageRole.Assistant,
-                    content = answer,
+                    content = display,
+                    inlineKeyboard = keyboard,
                 )
             )
         }
         saveIncomingReply(answer)
-        AgentReplyParts.lastFlashcard(answer)?.let { speakFlashcardOnce(it) }
+        // Only enter / speak cards when practice is active (or this message starts it).
+        if (_uiState.value.flashcardsActive) {
+            AgentReplyParts.lastFlashcard(answer)?.let { speakFlashcardOnce(it) }
+        }
+    }
+
+    private fun ingestTaskList(raw: String, openScreen: Boolean) {
+        val items = TaskListParser.parseSnapshot(raw) ?: return
+        viewModelScope.launch { preferences.saveTaskList(items) }
+        _uiState.update {
+            it.copy(
+                tasks = items,
+                tasksScreenOpen = if (openScreen) true else it.tasksScreenOpen,
+                statusNotice = TaskListParser.displaySummary(items),
+            )
+        }
+    }
+
+    private fun tasksAwareDisplay(
+        answer: String,
+        keyboard: TelegramInlineKeyboard?,
+        previousTasks: List<TaskItem> = _uiState.value.tasks,
+    ): String {
+        var display = memoryDisplayAnswer(answer)
+        if (keyboard != null) {
+            display = TelegramInlineKeyboardParser.stripFallbackLine(display)
+        }
+        if (TaskListParser.hasSnapshot(answer)) {
+            val items = TaskListParser.parseSnapshot(answer).orEmpty()
+            val prose = TaskListParser.stripSnapshotLines(display).trim()
+            val confirm = TaskListParser.confirmSpeech(previousTasks, items)
+            display = when {
+                confirm.isNotBlank() -> confirm
+                prose.isNotBlank() -> prose
+                else -> TaskListParser.displaySummary(items)
+            }
+        }
+        return display
+    }
+
+    fun openTasksScreen() {
+        _uiState.update { it.copy(tasksScreenOpen = true) }
+    }
+
+    fun closeTasksScreen() {
+        _uiState.update { it.copy(tasksScreenOpen = false) }
+    }
+
+    fun refreshTasksFromAgent() {
+        sendToTaskScheduler("список")
+    }
+
+    fun addTaskFromUi(title: String) {
+        val t = title.trim()
+        if (t.isEmpty()) return
+        sendToTaskScheduler("добавь: $t")
+    }
+
+    fun completeTaskFromUi(task: TaskItem) {
+        sendToTaskScheduler("готово ${task.id}")
+    }
+
+    fun deleteTaskFromUi(task: TaskItem) {
+        sendToTaskScheduler("удали ${task.id}")
+    }
+
+    private fun sendToTaskScheduler(command: String) {
+        val catalog = _uiState.value.addressees
+        val scheduler = catalog.find { it.id == Addressee.TASK_SCHEDULER_ID }
+            ?: Addressee.TASK_SCHEDULER
+        _uiState.update { it.copy(currentAddressee = scheduler) }
+        sendPrompt(command)
+    }
+
+    private fun resolveInlineKeyboard(answer: String): TelegramInlineKeyboard? {
+        val live = app.telegramUser.takePendingInlineKeyboard()
+            ?.takeIf { !it.isEmpty }
+        if (live != null) return live
+        return TelegramInlineKeyboardParser.fromTextFallback(answer)
+    }
+
+    fun onInlineButton(messageId: String, action: TelegramInlineAction) {
+        when (action) {
+            is TelegramInlineAction.SendText -> sendPrompt(action.text)
+            is TelegramInlineAction.Url -> {
+                runCatching {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(action.url))
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    getApplication<Application>().startActivity(intent)
+                }.onFailure { e ->
+                    _uiState.update { it.copy(lastError = e.message ?: "Не удалось открыть ссылку") }
+                }
+            }
+            is TelegramInlineAction.Callback -> {
+                val msg = _uiState.value.messages.find { it.id == messageId }
+                val kb = msg?.inlineKeyboard
+                if (kb == null || kb.messageId == 0L) {
+                    _uiState.update { it.copy(lastError = "Нет данных кнопки Telegram") }
+                    return
+                }
+                if (sendInFlight.get() || _uiState.value.isSending) {
+                    _uiState.update { it.copy(statusNotice = "Ждём ответ Hermes…") }
+                    return
+                }
+                // Clear buttons on this bubble after press (Telegram hides them after use often).
+                _uiState.update { state ->
+                    state.copy(
+                        messages = state.messages.map {
+                            if (it.id == messageId) it.copy(inlineKeyboard = null) else it
+                        }
+                    )
+                }
+                beginSend(
+                    userMessage = ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = MessageRole.User,
+                        content = msg?.let { buttonLabelFor(it, action) } ?: "✓",
+                    )
+                ) {
+                    val reply = app.telegramUser.pressInlineCallback(
+                        chatId = kb.chatId,
+                        messageId = kb.messageId,
+                        data = action.data,
+                    ) { partial -> showUserReply(partial, done = false) }
+                    showUserReply(reply)
+                }
+            }
+        }
+    }
+
+    private fun buttonLabelFor(message: ChatMessage, action: TelegramInlineAction.Callback): String {
+        val match = message.inlineKeyboard?.rows?.flatten()?.firstOrNull {
+            (it.action as? TelegramInlineAction.Callback)?.data?.contentEquals(action.data) == true
+        }
+        return match?.text ?: "✓"
     }
 
     private fun speakFlashcardOnce(card: AgentReplyParts.Flashcard): Boolean {
@@ -191,12 +355,20 @@ class HermesChatViewModel(
     }
 
     private fun ingestFlashcardControl(text: String) {
-        val lower = text.lowercase()
-        if (lower.contains("flashcard_stop")) {
-            exitFlashcards(sendStop = false)
-        } else if (lower.contains("flashcard_start")) {
-            _uiState.update { it.copy(flashcardsActive = true, flashcardBlanked = true) }
+        when {
+            hasFlashcardSkillMarker(text, "flashcard_stop") -> exitFlashcards(sendStop = false)
+            hasFlashcardSkillMarker(text, "flashcard_start") ->
+                _uiState.update { it.copy(flashcardsActive = true, flashcardBlanked = true) }
         }
+    }
+
+    /** True only for a JSON skill line, not prose that mentions flashcards. */
+    private fun hasFlashcardSkillMarker(text: String, skill: String): Boolean {
+        val re = Regex(
+            """\{[^{}]*"skill"\s*:\s*"${Regex.escape(skill)}"[^{}]*\}""",
+            RegexOption.IGNORE_CASE,
+        )
+        return text.lineSequence().any { re.containsMatchIn(it.trim()) }
     }
 
     private fun rememberFlashcard(card: AgentReplyParts.Flashcard) {
@@ -292,11 +464,14 @@ class HermesChatViewModel(
         app.headsetHub.btTestActive = true
         app.headsetHub.voiceGesturesEnabled = false
         abortVoiceForButtonTest("BT button test")
-        _uiState.update { it.copy(isRecording = false) }
+        _uiState.update { it.copy(bluetoothTestActive = true, isRecording = false) }
+        Log.i(TAG, "BT button test active — chat voice suppressed")
     }
 
     fun leaveBluetoothTest() {
         app.headsetHub.btTestActive = false
+        _uiState.update { it.copy(bluetoothTestActive = false) }
+        Log.i(TAG, "BT button test left")
     }
 
     private fun abortVoiceForButtonTest(reason: String) {
@@ -305,11 +480,18 @@ class HermesChatViewModel(
         silenceWatchJob = null
         if (voiceRecorder.isRecording) voiceRecorder.cancel()
         transcriber.cancel()
+        _uiState.update { it.copy(isRecording = false) }
         Log.i(TAG, "voice aborted — $reason")
     }
 
-    private fun isButtonTestScreen(): Boolean =
-        app.headsetHub.suppressChatVoice || _uiState.value.playTapTestActive
+    private fun isButtonTestScreen(): Boolean {
+        val ui = _uiState.value
+        return ui.bluetoothTestActive ||
+            ui.playTapTestActive ||
+            app.headsetHub.btTestActive ||
+            app.headsetHub.playTestActive ||
+            !app.headsetHub.voiceGesturesEnabled
+    }
 
     fun dismissMemoryReviewOverlay() {
         _uiState.update { it.copy(memoryReviewOverlay = null) }
@@ -454,6 +636,11 @@ class HermesChatViewModel(
             return MemoryReviewSummarizer.summarizeBody(answer)
         }
         MemoryReviewSummarizer.summarizeMemoryReply(answer)?.let { return it }
+        if (TaskListParser.hasSnapshot(answer)) {
+            val items = TaskListParser.parseSnapshot(answer).orEmpty()
+            val prose = TaskListParser.stripSnapshotLines(answer).trim()
+            return prose.ifBlank { TaskListParser.displaySummary(items) }
+        }
         return answer
     }
 
@@ -541,6 +728,11 @@ class HermesChatViewModel(
             }
         }
         viewModelScope.launch {
+            preferences.taskListFlow.collect { tasks ->
+                _uiState.update { it.copy(tasks = tasks) }
+            }
+        }
+        viewModelScope.launch {
             preferences.addresseeSettingsFlow.collect { settings ->
                 val default = Addressee.resolve(settings.catalog, settings.defaultAddresseeId)
                 _uiState.update { state ->
@@ -568,9 +760,9 @@ class HermesChatViewModel(
         }
         viewModelScope.launch {
             app.telegramUser.auth.collect { auth ->
-                _uiState.update {
-                    it.copy(telegramUserReady = auth is com.nous.ahcc.data.telegram.TelegramUserAuth.Ready)
-                }
+                val ready = auth is com.nous.ahcc.data.telegram.TelegramUserAuth.Ready
+                _uiState.update { it.copy(telegramUserReady = ready) }
+                if (ready) maybeEnableRuntimeFooter()
             }
         }
         viewModelScope.launch {
@@ -597,8 +789,12 @@ class HermesChatViewModel(
 
     fun claimHeadsetButtons() {
         HeadsetMonitorService.reassert(getApplication())
-        if (app.headsetHub.playTestActive || app.headsetHub.btTestActive) {
+        val ui = _uiState.value
+        if (ui.bluetoothTestActive || ui.playTapTestActive ||
+            app.headsetHub.btTestActive || app.headsetHub.playTestActive
+        ) {
             app.headsetHub.voiceGesturesEnabled = false
+            app.headsetHub.btTestActive = ui.bluetoothTestActive || app.headsetHub.btTestActive
             return
         }
         app.headsetHub.voiceGesturesEnabled = true
@@ -686,13 +882,76 @@ class HermesChatViewModel(
 
     private fun wireForAgent(text: String): String {
         val body = text.trim()
-        // Slash memory/session commands must go to Hermes bot as-is (no TO: routing).
-        if (body.startsWith("/memory", ignoreCase = true) ||
-            body.startsWith("/new", ignoreCase = true)
-        ) {
-            return body
-        }
+        // Slash commands must go to Hermes bot as-is (no TO: routing).
+        if (isHermesSlashPassthrough(body)) return body
         return Addressee.wireText(body, _uiState.value.currentAddressee)
+    }
+
+    private fun isHermesSlashPassthrough(body: String): Boolean {
+        val cmd = body.substringBefore(' ').substringBefore('\n').lowercase()
+        return cmd in HERMES_SLASH_PASSTHROUGH
+    }
+
+    private fun maybeEnableRuntimeFooter() {
+        if (!runtimeFooterEnsure.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            repeat(4) { attempt ->
+                delay(if (attempt == 0) 2_000 else 5_000)
+                if (!app.telegramUser.isReady) return@launch
+                if (sendInFlight.get() || _uiState.value.isSending) return@repeat
+                val reply = runCatching {
+                    app.telegramUser.sendTextAndWaitReply(
+                        text = "/footer on",
+                        botUsername = com.nous.ahcc.config.HermesConfig.TELEGRAM_BOT_USERNAME,
+                    )
+                }.getOrElse { e ->
+                    Log.w(TAG, "footer on failed: ${e.message}")
+                    return@repeat
+                }
+                Log.i(TAG, "runtime footer enabled: ${reply.take(120)}")
+                ingestContextUsage(reply)
+                return@launch
+            }
+            runtimeFooterEnsure.set(false)
+        }
+    }
+
+    private fun ingestContextUsage(raw: String) {
+        val pct = ContextUsageParser.parsePercent(raw)
+        if (pct != null) {
+            val until = contextNoticeDismissedUntil
+            val hide = until != null && pct < until
+            if (!hide) contextNoticeDismissedUntil = null
+            _uiState.update {
+                it.copy(
+                    contextPercent = pct,
+                    contextPressure = if (hide) null else ContextUsageParser.noticeFor(pct),
+                )
+            }
+            return
+        }
+        if (ContextUsageParser.mentionsCompression(raw) && contextNoticeDismissedUntil == null) {
+            val notice = ContextPressureNotice(
+                percent = _uiState.value.contextPercent ?: 70,
+                level = ContextPressure.High,
+                message = "Hermes сжал или переполнил контекст. Для новой задачи — «новая сессия»; иначе /compress.",
+            )
+            _uiState.update { it.copy(contextPressure = notice) }
+        }
+    }
+
+    fun dismissContextPressure() {
+        val pct = _uiState.value.contextPercent ?: 50
+        contextNoticeDismissedUntil = (pct + 5).coerceAtMost(101)
+        _uiState.update { it.copy(contextPressure = null) }
+    }
+
+    fun requestContextStatus() {
+        sendPrompt("/context")
+    }
+
+    fun requestContextCompress() {
+        sendPrompt("/compress")
     }
 
     private fun maybeResetAddresseeAfterSend(userText: String) {
@@ -711,8 +970,13 @@ class HermesChatViewModel(
     fun connect(forceNewSession: Boolean = false) {
         val config = _uiState.value.config
         viewModelScope.launch {
-            sendInFlight.set(false)
-            _uiState.update { it.copy(messages = emptyList(), lastError = null, isSending = false) }
+            val preserveChat = sendInFlight.get() || _uiState.value.isSending || pendingUserMessage != null
+            if (preserveChat) {
+                Log.w(TAG, "connect: keeping chat — send still in flight")
+            } else {
+                sendInFlight.set(false)
+                _uiState.update { it.copy(messages = emptyList(), lastError = null, isSending = false) }
+            }
             try {
                 val sb = AhccSupabaseClient(config.supabaseUrl, config.supabaseAnonKey)
                 val resolved = withContext(Dispatchers.IO) {
@@ -726,7 +990,7 @@ class HermesChatViewModel(
                 preferences.save(next)
                 _uiState.update { it.copy(config = next) }
 
-                if (sb.isConfigured) {
+                if (sb.isConfigured && !preserveChat) {
                     val rows = withContext(Dispatchers.IO) { sb.fetchSessionMessages(resolved) }
                     val loaded = rows.mapNotNull { row ->
                         when {
@@ -770,17 +1034,21 @@ class HermesChatViewModel(
                 chatGateway.connect(next)
                 ensureHeadsetCapture()
             } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        lastError = e.message,
-                        messages = listOf(
-                            ChatMessage(
-                                id = UUID.randomUUID().toString(),
-                                role = MessageRole.System,
-                                content = e.message ?: "Connect / Supabase failed"
+                if (preserveChat) {
+                    _uiState.update { it.copy(lastError = e.message) }
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            lastError = e.message,
+                            messages = listOf(
+                                ChatMessage(
+                                    id = UUID.randomUUID().toString(),
+                                    role = MessageRole.System,
+                                    content = e.message ?: "Connect / Supabase failed"
+                                )
                             )
                         )
-                    )
+                    }
                 }
             }
         }
@@ -915,6 +1183,10 @@ class HermesChatViewModel(
     private var recordToken = 0
 
     private fun startVoiceRecordingWithSilenceStop() {
+        if (isButtonTestScreen()) {
+            Log.i(TAG, "voice start blocked — button test screen")
+            return
+        }
         silenceWatchJob?.cancel()
         val token = ++recordToken
         cues.stopSpeaking()
@@ -924,6 +1196,12 @@ class HermesChatViewModel(
         silenceWatchJob = viewModelScope.launch {
             cues.beepAwait()
             if (token != recordToken) return@launch
+            if (isButtonTestScreen()) {
+                Log.i(TAG, "voice start aborted after beep — button test screen")
+                voiceRecorder.cancel()
+                _uiState.update { it.copy(isRecording = false) }
+                return@launch
+            }
             runCatching {
                 voiceRecorder.start()
                 Log.i(TAG, "voice recording started")
@@ -1171,7 +1449,7 @@ class HermesChatViewModel(
     }
 
     /** Slash command on the Hermes gateway. Does not enter the model context. */
-    private fun startHermesSession() {
+    private fun startHermesSession(resendAfter: String? = null) {
         if (!app.telegramUser.isReady) {
             _uiState.update { it.copy(lastError = "Войдите в Telegram как пользователь: Настройки") }
             return
@@ -1192,18 +1470,36 @@ class HermesChatViewModel(
             }
             val next = cfg.copy(sessionId = resolved)
             preferences.save(next)
+            contextNoticeDismissedUntil = null
+            val rotateNote = if (resendAfter != null) {
+                "Новая сессия — переношу запрос…"
+            } else {
+                null
+            }
             _uiState.update {
                 it.copy(
                     config = next,
                     draft = "",
+                    contextPercent = null,
+                    contextPressure = null,
+                    statusNotice = rotateNote,
                     messages = listOf(
                         ChatMessage(
                             id = UUID.randomUUID().toString(),
                             role = MessageRole.System,
-                            content = "Session $resolved"
+                            content = if (resendAfter != null) {
+                                "Session $resolved (запрос перенесён)"
+                            } else {
+                                "Session $resolved"
+                            }
                         )
                     )
                 )
+            }
+            // Wait until the prior turn releases the send lock.
+            repeat(60) {
+                if (!sendInFlight.get() && !_uiState.value.isSending) return@repeat
+                delay(100)
             }
             beginSend(
                 userMessage = ChatMessage(
@@ -1219,7 +1515,37 @@ class HermesChatViewModel(
                 showUserReply(reply)
                 if (reply.isBlank()) cues.speak("New session started.")
             }
+            if (!resendAfter.isNullOrBlank()) {
+                repeat(60) {
+                    if (!sendInFlight.get() && !_uiState.value.isSending) return@repeat
+                    delay(100)
+                }
+                suppressSessionRotateOnce = true
+                sendPrompt(resendAfter)
+            }
         }
+    }
+
+    /**
+     * Agent emitted `{"skill":"new_session","resend":true}` — open a fresh
+     * Hermes session and re-send the user's last text there.
+     */
+    private fun queueSessionRotateIfNeeded(answer: String): Boolean {
+        val rotate = AgentReplyParts.sessionRotate(answer) ?: return false
+        if (suppressSessionRotateOnce) {
+            suppressSessionRotateOnce = false
+            return false
+        }
+        val userText = pendingUserMessage?.content?.trim().orEmpty()
+        if (userText.isEmpty()) return false
+        if (isHermesSlashPassthrough(userText) || isNewSessionCommand(userText)) return false
+        if (!rotate.resend) {
+            startHermesSession()
+            return true
+        }
+        Log.i(TAG, "session rotate requested — resend chars=${userText.length}")
+        startHermesSession(resendAfter = userText)
+        return true
     }
 
     private fun showUserReply(reply: String, done: Boolean = true) {
@@ -1228,30 +1554,51 @@ class HermesChatViewModel(
         val answer = split.answer.ifBlank { reply.trim() }
         val isMemory = MemoryReviewNotification.isNotification(reply) ||
             MemoryReviewNotification.isNotification(answer)
-        val displayAnswer = memoryDisplayAnswer(answer)
-        // Don't TTS raw pending dumps; show RU summary in the bubble instead.
-        val speech = if (isMemory) "" else AgentReplyParts.forSpeech(answer)
+        val previousTasks = _uiState.value.tasks
+        val keyboard = if (done) resolveInlineKeyboard(answer) else null
+        val displayAnswer = if (done) {
+            tasksAwareDisplay(answer, keyboard, previousTasks)
+        } else {
+            memoryDisplayAnswer(answer)
+        }
+        // Don't TTS raw pending dumps / Writing paths; tasks get an English confirm.
+        val speech = when {
+            isMemory -> ""
+            done && TaskListParser.hasSnapshot(answer) -> {
+                val items = TaskListParser.parseSnapshot(answer).orEmpty()
+                TaskListParser.confirmSpeech(previousTasks, items)
+                    .ifBlank { AgentReplyParts.forSpeech(displayAnswer) }
+            }
+            else -> AgentReplyParts.forSpeech(answer)
+        }
         val typing = !done && speech.isEmpty() && !isMemory
         val targetId = pendingAssistantId
         _uiState.update { state ->
-            val existing = state.messages.any { it.id == targetId }
+            val base = ensurePendingUserVisible(state.messages)
+            val existing = base.any { it.id == targetId }
             val updated = if (targetId != null && existing) {
-                state.messages.map { msg ->
+                base.map { msg ->
                     if (msg.id != targetId) msg
-                    else if (displayAnswer.isNotEmpty()) {
-                        msg.copy(content = displayAnswer, isStreaming = typing, role = MessageRole.Assistant)
+                    else if (displayAnswer.isNotEmpty() || keyboard != null) {
+                        msg.copy(
+                            content = displayAnswer.ifBlank { msg.content },
+                            isStreaming = typing,
+                            role = MessageRole.Assistant,
+                            inlineKeyboard = keyboard ?: msg.inlineKeyboard,
+                        )
                     } else if (!typing) msg.copy(isStreaming = false)
                     else msg
                 }
-            } else if (displayAnswer.isNotEmpty()) {
-                state.messages + ChatMessage(
+            } else if (displayAnswer.isNotEmpty() || keyboard != null) {
+                base + ChatMessage(
                     id = targetId ?: UUID.randomUUID().toString(),
                     role = MessageRole.Assistant,
                     content = displayAnswer,
-                    isStreaming = typing
+                    isStreaming = typing,
+                    inlineKeyboard = keyboard,
                 )
             } else {
-                state.messages
+                base
             }
             state.copy(isSending = if (done || isMemory) false else typing, messages = updated)
         }
@@ -1271,8 +1618,17 @@ class HermesChatViewModel(
             saveIncomingReply(answer)
             maybeShowMemoryReviewOverlay(answer)
             ingestFlashcardControl(answer)
+            ingestContextUsage(answer)
+            ingestTaskList(answer, openScreen = TaskListParser.hasSnapshot(answer))
+            if (queueSessionRotateIfNeeded(answer)) {
+                cueVoiceReply = false
+                spokenReply = null
+                cues.stopWorkingCue()
+                cues.speak("Новая сессия. Переношу запрос.")
+                return
+            }
             val card = AgentReplyParts.lastFlashcard(answer)
-            if (card != null) {
+            if (card != null && _uiState.value.flashcardsActive) {
                 cueVoiceReply = false
                 spokenReply = null
                 cues.stopWorkingCue()
@@ -1374,6 +1730,7 @@ class HermesChatViewModel(
         spokenReply = null
         loggedTools = emptyList()
         pendingAssistantId = assistantId
+        pendingUserMessage = userMessage
         cues.startWorkingCue()
         val assistantPlaceholder = ChatMessage(
             id = assistantId,
@@ -1395,10 +1752,10 @@ class HermesChatViewModel(
             } catch (e: Exception) {
                 cueVoiceReply = false
                 _uiState.update { state ->
-                    state.copy(
-                        isSending = false,
-                        lastError = e.message,
-                        messages = state.messages.map { msg ->
+                    val base = ensurePendingUserVisible(state.messages)
+                    val hasAssistant = base.any { it.id == assistantId }
+                    val messages = if (hasAssistant) {
+                        base.map { msg ->
                             if (msg.id == assistantId) {
                                 msg.copy(
                                     content = "Failed to send: ${e.message}",
@@ -1407,16 +1764,48 @@ class HermesChatViewModel(
                                 )
                             } else msg
                         }
+                    } else {
+                        base + ChatMessage(
+                            id = assistantId,
+                            role = MessageRole.System,
+                            content = "Failed to send: ${e.message}",
+                        )
+                    }
+                    state.copy(
+                        isSending = false,
+                        lastError = e.message,
+                        messages = messages,
                     )
                 }
             } finally {
                 cues.stopWorkingCue()
-                sendInFlight.set(false)
                 _uiState.update { state ->
-                    if (state.isSending) state.copy(isSending = false) else state
+                    val withUser = ensurePendingUserVisible(state.messages)
+                    val next = if (withUser !== state.messages) state.copy(messages = withUser) else state
+                    if (next.isSending) next.copy(isSending = false) else next
                 }
+                pendingUserMessage = null
+                sendInFlight.set(false)
             }
         }
+    }
+
+    /** Re-insert the outbound "You" bubble if a connect/history reload removed it. */
+    private fun ensurePendingUserVisible(messages: List<ChatMessage>): List<ChatMessage> {
+        val pending = pendingUserMessage ?: return messages
+        if (messages.any { it.id == pending.id }) return messages
+        // Prefer keeping chronological order: user, then pending assistant if any, then rest.
+        val assistantId = pendingAssistantId
+        val withoutDupAssistant = messages.filterNot { it.id == assistantId }
+        val assistant = messages.find { it.id == assistantId }
+            ?: ChatMessage(
+                id = assistantId ?: UUID.randomUUID().toString(),
+                role = MessageRole.Assistant,
+                content = "",
+                isStreaming = true,
+            )
+        Log.w(TAG, "restored missing outbound user bubble id=${pending.id}")
+        return withoutDupAssistant + pending + assistant
     }
 
     fun playInbound(path: String) {
@@ -1697,6 +2086,9 @@ class HermesChatViewModel(
 
     companion object {
         private const val TAG = "AHCC-ChatVM"
+        private val HERMES_SLASH_PASSTHROUGH = setOf(
+            "/memory", "/new", "/context", "/ctx", "/compress", "/footer", "/status", "/usage",
+        )
         private const val VOICE_FAIL_INSTRUCTION =
             "If you cannot understand or transcribe the speech, reply with only this JSON and no other text: " +
                 "{\"skill\":\"local_transcription\",\"enabled\":true}"

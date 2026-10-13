@@ -20,6 +20,10 @@ import kotlinx.coroutines.withTimeout
 import com.nous.ahcc.config.HermesConfig
 import com.nous.ahcc.domain.model.AgentReplyParts
 import com.nous.ahcc.domain.model.MemoryReviewNotification
+import com.nous.ahcc.domain.model.TaskListParser
+import com.nous.ahcc.domain.model.TelegramInlineAction
+import com.nous.ahcc.domain.model.TelegramInlineButton
+import com.nous.ahcc.domain.model.TelegramInlineKeyboard
 import org.drinkless.tdlib.Client
 import org.drinkless.tdlib.TdApi
 import java.io.File
@@ -51,11 +55,14 @@ class TelegramUserSession(context: Context) {
     private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val replyLock = Any()
     private val replyParts = linkedMapOf<Long, String>()
+    private val replyMarkups = linkedMapOf<Long, TelegramInlineKeyboard>()
     private val outgoingIds = mutableSetOf<Long>()
     private val idleFlashcardIds = mutableSetOf<Long>()
     private val idleMemoryReviewIds = mutableSetOf<Long>()
+    private val idleKeyboardIds = mutableSetOf<Long>()
     @Volatile private var replyWaiter: CompletableDeferred<String>? = null
     @Volatile private var onReply: ((String) -> Unit)? = null
+    @Volatile private var pendingInlineKeyboard: TelegramInlineKeyboard? = null
     /** Incoming bot messages that arrive after AHCC stopped waiting, such as a later flashcard. */
     @Volatile var onIdleMessage: ((String) -> Unit)? = null
     /** Self-improvement / memory approval notices while not waiting on a reply. */
@@ -106,6 +113,56 @@ class TelegramUserSession(context: Context) {
 
     val isReady: Boolean get() = _auth.value is TelegramUserAuth.Ready
 
+    /** Inline keyboard from the last completed bot reply (cleared on take). */
+    fun takePendingInlineKeyboard(): TelegramInlineKeyboard? {
+        val kb = pendingInlineKeyboard
+        pendingInlineKeyboard = null
+        return kb
+    }
+
+    suspend fun pressInlineCallback(
+        chatId: Long,
+        messageId: Long,
+        data: ByteArray,
+        botUsername: String = HermesConfig.TELEGRAM_BOT_USERNAME,
+        onUpdate: (String) -> Unit = {},
+    ): String = withContext(Dispatchers.IO) {
+        if (!isReady) error("Сначала войдите в Telegram как пользователь")
+        val resolvedChat = if (chatId != 0L) chatId else ensureBotChat(botUsername)
+        val waiter = CompletableDeferred<String>()
+        synchronized(replyLock) {
+            replyParts.clear()
+            replyMarkups.clear()
+            outgoingIds.clear()
+        }
+        quietJob?.cancel()
+        onReply = onUpdate
+        replyWaiter = waiter
+        try {
+            val answer = sendExpect<TdApi.CallbackQueryAnswer>(
+                TdApi.GetCallbackQueryAnswer(
+                    resolvedChat,
+                    messageId,
+                    TdApi.CallbackQueryPayloadData(data),
+                )
+            )
+            Log.i(TAG, "callback answer chars=${answer.text?.length ?: 0} alert=${answer.showAlert}")
+            try {
+                withTimeout(WAIT_MS) { waiter.await() }
+            } catch (_: kotlinx.coroutines.TimeoutCancellationException) {
+                val partial = snapshotForUi()
+                if (partial.isNotBlank()) partial
+                else answer.text?.takeIf { it.isNotBlank() }
+                    ?: error("Нет ответа бота после нажатия кнопки")
+            }
+        } finally {
+            replyWaiter = null
+            onReply = null
+            quietJob?.cancel()
+            pendingInlineKeyboard = synchronized(replyLock) { latestKeyboard() }
+        }
+    }
+
     suspend fun sendTextAndWaitReply(
         text: String,
         botUsername: String,
@@ -143,8 +200,10 @@ class TelegramUserSession(context: Context) {
         val waiter = CompletableDeferred<String>()
         synchronized(replyLock) {
             replyParts.clear()
+            replyMarkups.clear()
             outgoingIds.clear()
         }
+        pendingInlineKeyboard = null
         quietJob?.cancel()
         onReply = onUpdate
         replyWaiter = waiter
@@ -165,6 +224,7 @@ class TelegramUserSession(context: Context) {
             replyWaiter = null
             onReply = null
             quietJob?.cancel()
+            pendingInlineKeyboard = synchronized(replyLock) { latestKeyboard() }
         }
     }
 
@@ -180,7 +240,7 @@ class TelegramUserSession(context: Context) {
             is TdApi.UpdateAuthorizationState -> onAuth(update.authorizationState)
             is TdApi.UpdateNewMessage -> onIncoming(update.message)
             is TdApi.UpdateMessageContent ->
-                acceptText(update.chatId, update.messageId, textOf(update.newContent))
+                acceptText(update.chatId, update.messageId, textOf(update.newContent), keyboard = null)
         }
     }
 
@@ -240,43 +300,66 @@ class TelegramUserSession(context: Context) {
             synchronized(replyLock) {
                 outgoingIds.add(message.id)
                 replyParts.remove(message.id)
+                replyMarkups.remove(message.id)
             }
             return
         }
         val text = textOf(message.content)
-        if (text == null && replyWaiter != null) {
+        val keyboard = parseInlineKeyboard(message)
+        if (keyboard != null) {
+            synchronized(replyLock) { replyMarkups[message.id] = keyboard }
+            Log.i(TAG, "inline keyboard rows=${keyboard.rows.size} msg=${message.id}")
+        }
+        if (text == null && replyWaiter != null && keyboard == null) {
             Log.i(TAG, "skip ${message.content.javaClass.simpleName}")
         }
-        acceptText(message.chatId, message.id, text)
+        acceptText(message.chatId, message.id, text, keyboard)
     }
 
     /**
      * Shell and tool cards arrive first. The transcript comes later as its own message.
      * Tool lines must not close the wait.
      */
-    private fun acceptText(chatId: Long, messageId: Long, raw: String?) {
+    private fun acceptText(
+        chatId: Long,
+        messageId: Long,
+        raw: String?,
+        keyboard: TelegramInlineKeyboard?,
+    ) {
         if (botChatId != 0L && chatId != botChatId) return
         if (synchronized(replyLock) { messageId in outgoingIds }) return
         val text = raw?.trim().orEmpty()
-        if (text.isEmpty() || AgentReplyParts.isOwnEcho(text)) return
+        if ((text.isEmpty() || AgentReplyParts.isOwnEcho(text)) && keyboard == null) return
         val waiter = replyWaiter
         if (waiter == null) {
-            if (MemoryReviewNotification.isNotification(text)) {
+            if (text.isNotEmpty() && MemoryReviewNotification.isNotification(text)) {
                 val fresh = synchronized(replyLock) { idleMemoryReviewIds.add(messageId) }
                 if (fresh) {
                     Log.i(TAG, "idle memory review chars=${text.length}")
                     onMemoryReviewMessage?.invoke(text)
                 }
             }
-            if (!AgentReplyParts.isFlashcardRelay(text)) return
+            if (keyboard != null) {
+                val fresh = synchronized(replyLock) { idleKeyboardIds.add(messageId) }
+                if (fresh) {
+                    pendingInlineKeyboard = keyboard
+                    Log.i(TAG, "idle inline keyboard chars=${text.length}")
+                    if (text.isNotEmpty()) onIdleMessage?.invoke(text)
+                }
+                return
+            }
+            val isTasks = TaskListParser.hasSnapshot(text)
+            if (!AgentReplyParts.isFlashcardRelay(text) && !isTasks) return
             val fresh = synchronized(replyLock) { idleFlashcardIds.add(messageId) }
             if (!fresh) return
-            Log.i(TAG, "idle flashcard chars=${text.length}")
+            Log.i(TAG, "idle bot payload chars=${text.length} tasks=$isTasks")
             onIdleMessage?.invoke(text)
             return
         }
         val shown = synchronized(replyLock) {
-            replyParts[messageId] = text
+            if (text.isNotEmpty() && !AgentReplyParts.isOwnEcho(text)) {
+                replyParts[messageId] = text
+            }
             visibleReply()
         }
         Log.i(TAG, "reply update chars=${shown.length}")
@@ -287,20 +370,54 @@ class TelegramUserSession(context: Context) {
         val hasAnswer = synchronized(replyLock) {
             replyParts.values.any { AgentReplyParts.containsAnswer(it) }
         }
+        val hasKeyboard = keyboard != null || synchronized(replyLock) { replyMarkups.isNotEmpty() }
         quietJob?.cancel()
         // Memory pending arrives as one (or few) finished dumps — don't wait 15s.
+        // Confirm dialogs with buttons are complete once keyboard arrives.
         val quietMs = when {
             hasMemory -> MEMORY_QUIET_MS
+            hasKeyboard && shown.isNotEmpty() -> KEYBOARD_QUIET_MS
             hasAnswer -> ANSWER_QUIET_MS
             else -> PARTIAL_QUIET_MS
         }
-        if (!hasAnswer && shown.isBlank()) return
+        if (!hasAnswer && shown.isBlank() && !hasKeyboard) return
         quietJob = sessionScope.launch {
             delay(quietMs)
             val latest = snapshotForUi()
-            if (replyWaiter !== waiter || waiter.isCompleted || latest.isBlank()) return@launch
-            waiter.complete(latest)
+            if (replyWaiter !== waiter || waiter.isCompleted) return@launch
+            if (latest.isBlank() && !hasKeyboard) return@launch
+            pendingInlineKeyboard = synchronized(replyLock) { latestKeyboard() }
+            waiter.complete(latest.ifBlank { shown.ifBlank { " " } })
         }
+    }
+
+    private fun latestKeyboard(): TelegramInlineKeyboard? =
+        replyMarkups.entries.lastOrNull()?.value
+
+    private fun parseInlineKeyboard(message: TdApi.Message): TelegramInlineKeyboard? {
+        val markup = message.replyMarkup as? TdApi.ReplyMarkupInlineKeyboard ?: return null
+        val rows = markup.rows?.mapNotNull { row ->
+            val buttons = row?.mapNotNull { btn ->
+                if (btn == null) return@mapNotNull null
+                val label = btn.text?.trim().orEmpty()
+                if (label.isEmpty()) return@mapNotNull null
+                val action = when (val t = btn.type) {
+                    is TdApi.InlineKeyboardButtonTypeCallback ->
+                        TelegramInlineAction.Callback(t.data ?: return@mapNotNull null)
+                    is TdApi.InlineKeyboardButtonTypeUrl ->
+                        TelegramInlineAction.Url(t.url?.trim().orEmpty().ifEmpty { return@mapNotNull null })
+                    else -> return@mapNotNull null
+                }
+                TelegramInlineButton(text = label, action = action)
+            }.orEmpty()
+            buttons.takeIf { it.isNotEmpty() }
+        }.orEmpty()
+        if (rows.isEmpty()) return null
+        return TelegramInlineKeyboard(
+            chatId = message.chatId,
+            messageId = message.id,
+            rows = rows,
+        )
     }
 
     private fun snapshotForUi(): String = synchronized(replyLock) { visibleReply() }
@@ -351,6 +468,8 @@ class TelegramUserSession(context: Context) {
         private const val PARTIAL_QUIET_MS = 4_000L
         /** `/memory pending` and review notices are complete payloads. */
         private const val MEMORY_QUIET_MS = 2_000L
+        /** Confirm /new style replies: text + inline keyboard, no long tool stream. */
+        private const val KEYBOARD_QUIET_MS = 1_200L
         private const val WAIT_MS = 180_000L
     }
 }

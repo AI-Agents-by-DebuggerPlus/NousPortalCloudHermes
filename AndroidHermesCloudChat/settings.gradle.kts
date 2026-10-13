@@ -12,6 +12,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         maven("https://jitpack.io")
+        maven("https://mvn.mchv.eu/repository/mchv/")
     }
 }
 

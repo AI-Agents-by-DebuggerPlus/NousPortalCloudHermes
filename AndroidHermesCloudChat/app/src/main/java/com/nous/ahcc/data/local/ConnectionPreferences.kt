@@ -13,6 +13,8 @@ import com.nous.ahcc.config.HermesConfig
 import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.ConnectionConfig
 import com.nous.ahcc.domain.model.FlashcardDisplaySettings
+import com.nous.ahcc.domain.model.TaskItem
+import com.nous.ahcc.domain.model.TaskListParser
 import com.nous.ahcc.domain.model.TransportMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -56,6 +58,7 @@ class ConnectionPreferences(private val context: Context) {
         val flashcardEnTopPad = intPreferencesKey("flashcard_en_top_pad")
         val flashcardEnRuGap = intPreferencesKey("flashcard_en_ru_gap")
         val flashcardRuSmallerPct = intPreferencesKey("flashcard_ru_smaller_pct")
+        val taskListSnapshot = stringPreferencesKey("task_list_snapshot")
     }
 
     data class AddresseeSettings(
@@ -64,7 +67,9 @@ class ConnectionPreferences(private val context: Context) {
     )
 
     val addresseeSettingsFlow: Flow<AddresseeSettings> = context.dataStore.data.map { prefs ->
-        val catalog = Addressee.decodeCatalog(prefs[Keys.addresseeCatalogJson]).ifEmpty { Addressee.defaultCatalog }
+        val catalog = Addressee.normalizeCatalog(
+            Addressee.decodeCatalog(prefs[Keys.addresseeCatalogJson]).ifEmpty { Addressee.defaultCatalog },
+        )
         val storedDefault = prefs[Keys.defaultAddresseeId]?.let { id ->
             if (id == "liaison") Addressee.MAIN_AGENT_ID else id
         }
@@ -83,7 +88,9 @@ class ConnectionPreferences(private val context: Context) {
 
     suspend fun readAddresseeCatalog(): List<Addressee> {
         val prefs = context.dataStore.data.first()
-        return Addressee.decodeCatalog(prefs[Keys.addresseeCatalogJson]).ifEmpty { Addressee.defaultCatalog }
+        return Addressee.normalizeCatalog(
+            Addressee.decodeCatalog(prefs[Keys.addresseeCatalogJson]).ifEmpty { Addressee.defaultCatalog },
+        )
     }
 
     suspend fun addAddressee(addressee: Addressee): List<Addressee> {
@@ -186,6 +193,18 @@ class ConnectionPreferences(private val context: Context) {
     suspend fun saveLocalTranscription(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.localTranscription] = enabled
+        }
+    }
+
+    val taskListFlow: Flow<List<TaskItem>> = context.dataStore.data.map { prefs ->
+        val raw = prefs[Keys.taskListSnapshot].orEmpty()
+        if (raw.isBlank()) emptyList()
+        else TaskListParser.parseSnapshot(raw) ?: emptyList()
+    }
+
+    suspend fun saveTaskList(items: List<TaskItem>) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.taskListSnapshot] = TaskListParser.encodeSnapshot(items)
         }
     }
 

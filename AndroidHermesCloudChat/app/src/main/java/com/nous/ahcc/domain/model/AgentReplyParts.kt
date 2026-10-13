@@ -39,6 +39,9 @@ object AgentReplyParts {
         val text = line.trim()
         if (text.isEmpty() || isOwnEcho(text) || isToolLine(text) || isSpeechHeading(text)) return null
         if (isFlashcardPayload(text) || requestsLocalTranscription(text)) return null
+        if (sessionRotate(text) != null) return null
+        if (TaskListParser.hasSnapshot(text)) return null
+        if (ContextUsageParser.isRuntimeFooterLine(text)) return null
         val span = leadingEmojiSpan(text)
         val body = if (span > 0) text.substring(span).trim() else text
         if (body.isEmpty() || isStatusStamp(body)) return null
@@ -154,6 +157,46 @@ object AgentReplyParts {
         }
     }
 
+    data class SessionRotate(val resend: Boolean)
+
+    /**
+     * MainAgent asks AHCC to open a fresh Hermes session and optionally
+     * re-send the user's last text there (`{"skill":"new_session","resend":true}`).
+     */
+    fun sessionRotate(text: String): SessionRotate? {
+        var i = 0
+        while (i < text.length) {
+            val start = text.indexOf('{', i)
+            if (start < 0) break
+            var depth = 0
+            var end = -1
+            for (j in start until text.length) {
+                if (text[j] == '{') depth++
+                else if (text[j] == '}') {
+                    depth--
+                    if (depth == 0) {
+                        end = j
+                        break
+                    }
+                }
+            }
+            if (end < 0) break
+            parseSessionRotate(text.substring(start, end + 1))?.let { return it }
+            i = end + 1
+        }
+        return null
+    }
+
+    private fun parseSessionRotate(json: String): SessionRotate? {
+        return try {
+            val root = JSONObject(json)
+            if (!root.optString("skill").equals("new_session", ignoreCase = true)) return null
+            SessionRotate(resend = root.optBoolean("resend", true))
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     fun isFlashcardRelay(text: String): Boolean = isFlashcardPayload(text)
 
     private fun isFlashcardPayload(text: String): Boolean {
@@ -191,6 +234,7 @@ object AgentReplyParts {
 
     fun containsAnswer(raw: String): Boolean {
         if (MemoryReviewNotification.isNotification(raw)) return true
+        if (TaskListParser.hasSnapshot(raw)) return true
         if (forSpeech(split(raw).answer).isNotBlank()) return true
         if (lastFlashcard(raw) != null) return true
         return split(raw).answer.lines().any { line ->
@@ -249,6 +293,17 @@ object AgentReplyParts {
             text.equals("terminal", ignoreCase = true) ||
             text.startsWith("tool_") ||
             text.startsWith("Reading skill", ignoreCase = true)
+        ) {
+            return true
+        }
+        // Tool progress / path stamps (must not be spoken or shown as the answer).
+        if (text.startsWith("Writing", ignoreCase = true) ||
+            text.startsWith("Wrote", ignoreCase = true) ||
+            text.startsWith("Appending", ignoreCase = true) ||
+            text.startsWith("Creating", ignoreCase = true) ||
+            text.startsWith("Reading ", ignoreCase = true) ||
+            text.contains("/opt/data/cache/scratch", ignoreCase = true) ||
+            (text.contains("ahcc_task", ignoreCase = true) && text.contains(".txt"))
         ) {
             return true
         }

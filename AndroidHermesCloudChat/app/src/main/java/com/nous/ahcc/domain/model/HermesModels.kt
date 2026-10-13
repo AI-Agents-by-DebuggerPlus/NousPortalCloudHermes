@@ -65,7 +65,9 @@ data class ChatMessage(
     val attachmentKind: MediaKind? = null,
     val attachmentName: String? = null,
     val localMediaPath: String? = null,
-    val inboundMedia: List<InboundMedia> = emptyList()
+    val inboundMedia: List<InboundMedia> = emptyList(),
+    /** Telegram-style inline buttons under the bubble (live markup or text fallback). */
+    val inlineKeyboard: TelegramInlineKeyboard? = null,
 )
 
 enum class MessageRole {

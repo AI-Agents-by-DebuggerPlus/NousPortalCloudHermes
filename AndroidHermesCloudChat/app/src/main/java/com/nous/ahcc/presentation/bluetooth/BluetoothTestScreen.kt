@@ -70,15 +70,14 @@ fun BluetoothTestScreen(
     val state by vm.state.collectAsStateWithLifecycle()
 
     DisposableEffect(Unit) {
+        // enter/leave + voice suppress: AhccNavHost DisposableEffect on this route.
+        // Do not re-enable voiceGesturesEnabled here — that raced with chat claimHeadsetButtons.
         val hub = (app as AhccApp).headsetHub
         hub.btTestActive = true
         hub.voiceGesturesEnabled = false
         HeadsetMonitorService.reassert(context)
         onDispose {
-            hub.btTestActive = false
-            if (!hub.playTestActive) {
-                hub.voiceGesturesEnabled = true
-            }
+            // Hub flags cleared by viewModel.leaveBluetoothTest() in NavHost.
         }
     }
     val permissionLauncher = rememberLauncherForActivityResult(

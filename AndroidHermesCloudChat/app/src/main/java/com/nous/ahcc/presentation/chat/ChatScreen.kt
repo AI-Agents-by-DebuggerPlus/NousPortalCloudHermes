@@ -24,13 +24,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -46,11 +50,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.Headphones
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PowerSettingsNew
@@ -60,6 +66,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
@@ -113,17 +120,23 @@ import com.nous.ahcc.BuildConfig
 import com.nous.ahcc.domain.model.Addressee
 import com.nous.ahcc.domain.model.ChatMessage
 import com.nous.ahcc.domain.model.ConnectionState
+import com.nous.ahcc.domain.model.ContextPressure
+import com.nous.ahcc.domain.model.ContextPressureNotice
 import com.nous.ahcc.domain.model.MediaKind
 import com.nous.ahcc.domain.model.MessageRole
+import com.nous.ahcc.domain.model.TelegramInlineAction
+import com.nous.ahcc.domain.model.TelegramInlineButton
+import com.nous.ahcc.domain.model.TelegramInlineKeyboard
 import java.io.File
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ChatScreen(
     viewModel: HermesChatViewModel,
     onOpenSettings: () -> Unit,
     onOpenBluetoothTest: () -> Unit,
-    onOpenToolLog: () -> Unit
+    onOpenToolLog: () -> Unit,
+    onOpenTasks: () -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
@@ -243,6 +256,7 @@ fun ChatScreen(
                 },
                 onOpenSettings = onOpenSettings,
                 onOpenBluetoothTest = onOpenBluetoothTest,
+                onOpenTasks = onOpenTasks,
                 onClear = viewModel::clearChat,
                 onNewSession = viewModel::newSession,
                 onShutdown = {
@@ -261,6 +275,18 @@ fun ChatScreen(
         ) {
             if (state.isSending && !state.isRecording) {
                 TypingBanner()
+            }
+            state.contextPressure?.let { notice ->
+                ContextPressureBanner(
+                    notice = notice,
+                    onDismiss = viewModel::dismissContextPressure,
+                    onCompress = viewModel::requestContextCompress,
+                    onNewSession = {
+                        viewModel.dismissContextPressure()
+                        viewModel.sendPrompt("новая сессия")
+                    },
+                    onCheck = viewModel::requestContextStatus,
+                )
             }
             Box(
                 modifier = Modifier
@@ -284,7 +310,10 @@ fun ChatScreen(
                             MessageBubble(
                                 message = message,
                                 playingPath = state.playingPath,
-                                onPlayVoice = viewModel::playInbound
+                                onPlayVoice = viewModel::playInbound,
+                                onInlineButton = { action ->
+                                    viewModel.onInlineButton(message.id, action)
+                                },
                             )
                         }
                     }
@@ -297,15 +326,17 @@ fun ChatScreen(
             val composerBusy = state.isSending || state.isRecording
             val botConnected = state.connectionState == ConnectionState.Connected
             val canSend = botConnected && state.telegramUserReady
+            val imeVisible = WindowInsets.isImeVisible
             ComposerBar(
                 draft = state.draft,
                 enabled = canSend,
                 connectHint = when {
                     !botConnected -> "Connect first"
                     !state.telegramUserReady -> "Telegram user login: Settings"
-                    else -> "Message... Enter to send"
+                    else -> "Message… Enter send · Shift+Enter newline"
                 },
                 composerBusy = composerBusy,
+                compact = imeVisible,
                 addressees = state.addressees,
                 selectedAddressee = state.currentAddressee,
                 defaultAddressee = state.defaultAddressee,
@@ -322,18 +353,20 @@ fun ChatScreen(
                 onCamera = { launchCamera() },
                 onMic = { launchMic() }
             )
-            Text(
-                text = state.toolStatus.ifBlank { "Служебные команды" },
-                color = Color(0xFFE8F4F3),
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFF123D45))
-                    .clickable(onClick = onOpenToolLog)
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            )
+            if (!imeVisible) {
+                Text(
+                    text = state.toolStatus.ifBlank { "Служебные команды" },
+                    color = Color(0xFFE8F4F3),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF123D45))
+                        .clickable(onClick = onOpenToolLog)
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
         }
     }
 }
@@ -412,6 +445,7 @@ private fun ChatTopBar(
     onToggleConnection: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenBluetoothTest: () -> Unit,
+    onOpenTasks: () -> Unit,
     onClear: () -> Unit,
     onNewSession: () -> Unit,
     onShutdown: () -> Unit,
@@ -423,74 +457,120 @@ private fun ChatTopBar(
         connectionState == ConnectionState.Error -> MaterialTheme.colorScheme.error
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
+    var menuOpen by remember { mutableStateOf(false) }
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .statusBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 12.dp, vertical = 6.dp),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "AHCC v${BuildConfig.VERSION_LABEL}",
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onBackground
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(statusColor)
-                )
-                Spacer(Modifier.size(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "${connectionState.name} В· $hostLabel",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = "AHCC v${BuildConfig.VERSION_LABEL}",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(statusColor)
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Text(
+                        text = "${connectionState.name} · $hostLabel",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            IconButton(onClick = onOpenTasks) {
+                Icon(
+                    imageVector = Icons.Default.Checklist,
+                    contentDescription = "Задачи",
+                    tint = MaterialTheme.colorScheme.onBackground,
                 )
             }
-        }
-        IconButton(onClick = onShutdown) {
-            Icon(
-                imageVector = Icons.Default.PowerSettingsNew,
-                contentDescription = "Выключить",
-                tint = MaterialTheme.colorScheme.onBackground
-            )
-        }
-        TextButton(onClick = onClear) {
-            Text("Clear", color = MaterialTheme.colorScheme.onBackground)
-        }
-        TextButton(onClick = onNewSession) {
-            Text("New", color = MaterialTheme.colorScheme.onBackground)
-        }
-        IconButton(onClick = onOpenBluetoothTest) {
-            Icon(
-                imageVector = Icons.Default.Headphones,
-                contentDescription = "BT test",
-                tint = MaterialTheme.colorScheme.onBackground
-            )
-        }
-        IconButton(onClick = onToggleConnection) {
-            Icon(
-                imageVector = if (connectionState == ConnectionState.Connected) {
-                    Icons.Default.LinkOff
-                } else {
-                    Icons.Default.Link
-                },
-                contentDescription = "Toggle connection",
-                tint = MaterialTheme.colorScheme.primary
-            )
-        }
-        IconButton(onClick = onOpenSettings) {
-            Icon(
-                imageVector = Icons.Default.Settings,
-                contentDescription = "Settings",
-                tint = MaterialTheme.colorScheme.onBackground
-            )
+            IconButton(onClick = onToggleConnection) {
+                Icon(
+                    imageVector = if (connectionState == ConnectionState.Connected) {
+                        Icons.Default.LinkOff
+                    } else {
+                        Icons.Default.Link
+                    },
+                    contentDescription = "Toggle connection",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+            IconButton(onClick = onOpenSettings) {
+                Icon(
+                    imageVector = Icons.Default.Settings,
+                    contentDescription = "Settings",
+                    tint = MaterialTheme.colorScheme.onBackground,
+                )
+            }
+            Box {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(
+                        imageVector = Icons.Default.MoreVert,
+                        contentDescription = "Ещё",
+                        tint = MaterialTheme.colorScheme.onBackground,
+                    )
+                }
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("New session", color = Color(0xFFE8F4F3)) },
+                        onClick = {
+                            menuOpen = false
+                            onNewSession()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Clear chat", color = Color(0xFFE8F4F3)) },
+                        onClick = {
+                            menuOpen = false
+                            onClear()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("BT test", color = Color(0xFFE8F4F3)) },
+                        leadingIcon = {
+                            Icon(Icons.Default.Headphones, contentDescription = null, tint = Color(0xFFE8F4F3))
+                        },
+                        onClick = {
+                            menuOpen = false
+                            onOpenBluetoothTest()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Выключить", color = Color(0xFFE8F4F3)) },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.PowerSettingsNew,
+                                contentDescription = null,
+                                tint = Color(0xFFE8F4F3),
+                            )
+                        },
+                        onClick = {
+                            menuOpen = false
+                            onShutdown()
+                        },
+                    )
+                }
+            }
         }
     }
 }
@@ -535,6 +615,58 @@ private fun TypingBanner() {
 }
 
 @Composable
+private fun ContextPressureBanner(
+    notice: ContextPressureNotice,
+    onDismiss: () -> Unit,
+    onCompress: () -> Unit,
+    onNewSession: () -> Unit,
+    onCheck: () -> Unit,
+) {
+    val bg = when (notice.level) {
+        ContextPressure.Watch -> Color(0xFF1A4550)
+        ContextPressure.High -> Color(0xFF4A3A12)
+        ContextPressure.Critical -> Color(0xFF4A1A1A)
+        ContextPressure.None -> Color(0xFF1A4550)
+    }
+    val fg = Color(0xFFE8F4F3)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(bg)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+    ) {
+        Text(
+            text = notice.message,
+            color = fg,
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onCheck) {
+                Text("Статус", color = fg, style = MaterialTheme.typography.labelMedium)
+            }
+            if (notice.level != ContextPressure.Watch) {
+                TextButton(onClick = onCompress) {
+                    Text("Сжать", color = fg, style = MaterialTheme.typography.labelMedium)
+                }
+                TextButton(onClick = onNewSession) {
+                    Text("Новая", color = fg, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            TextButton(onClick = onDismiss) {
+                Text("Скрыть", color = Color(0xFF8AA8A6), style = MaterialTheme.typography.labelMedium)
+            }
+        }
+    }
+}
+
+@Composable
 private fun TypingDots(color: Color) {
     val transition = rememberInfiniteTransition(label = "typing")
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -562,7 +694,8 @@ private fun TypingDots(color: Color) {
 private fun MessageBubble(
     message: ChatMessage,
     playingPath: String?,
-    onPlayVoice: (String) -> Unit
+    onPlayVoice: (String) -> Unit,
+    onInlineButton: (TelegramInlineAction) -> Unit = {},
 ) {
     val isUser = message.role == MessageRole.User
     val align = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
@@ -576,65 +709,130 @@ private fun MessageBubble(
         MessageRole.User -> MaterialTheme.colorScheme.onPrimary
         else -> MaterialTheme.colorScheme.onSurface
     }
+    val keyboard = message.inlineKeyboard
+    val hasKeyboard = keyboard != null && !keyboard.isEmpty
 
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = align) {
-        if (message.content.isBlank() && !message.isStreaming) return@Box
-        Column(
-            modifier = Modifier
-                .widthIn(max = 340.dp)
-                .clip(RoundedCornerShape(18.dp))
-                .background(bg)
-                .padding(horizontal = 14.dp, vertical = 10.dp)
-        ) {
-            Text(
-                text = when (message.role) {
-                    MessageRole.User -> "You"
-                    MessageRole.Assistant -> if (message.isStreaming) "Hermes · печатает" else "Hermes"
-                    MessageRole.Tool -> "Tool В· ${message.toolName ?: "?"}"
-                    MessageRole.System -> "System"
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = fg.copy(alpha = 0.7f)
-            )
-            Spacer(Modifier.height(4.dp))
-            if (message.isStreaming && message.content.isBlank()) {
-                TypingDots(color = fg)
-            } else {
+        if (message.content.isBlank() && !message.isStreaming && !hasKeyboard) return@Box
+        Column(modifier = Modifier.widthIn(max = 340.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(bg)
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
                 Text(
-                    text = message.content,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = fg
+                    text = when (message.role) {
+                        MessageRole.User -> "You"
+                        MessageRole.Assistant -> if (message.isStreaming) "Hermes · печатает" else "Hermes"
+                        MessageRole.Tool -> "Tool · ${message.toolName ?: "?"}"
+                        MessageRole.System -> "System"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = fg.copy(alpha = 0.7f)
+                )
+                Spacer(Modifier.height(4.dp))
+                if (message.isStreaming && message.content.isBlank()) {
+                    TypingDots(color = fg)
+                } else if (message.content.isNotBlank()) {
+                    Text(
+                        text = message.content,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = fg
+                    )
+                }
+                val voicePath = message.localMediaPath
+                    ?: message.inboundMedia.firstOrNull { it.kind == MediaKind.Voice }?.filePath
+                if (voicePath != null) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = { onPlayVoice(voicePath) }) {
+                        Icon(
+                            imageVector = if (playingPath == voicePath) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            contentDescription = null
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text(if (playingPath == voicePath) "Stop" else "Voice")
+                    }
+                } else if (message.attachmentKind == MediaKind.Photo) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("Photo: ${message.attachmentName ?: "photo"}", color = fg.copy(alpha = 0.85f))
+                } else if (message.attachmentKind == MediaKind.File) {
+                    Spacer(Modifier.height(4.dp))
+                    Text("File: ${message.attachmentName ?: "file"}", color = fg.copy(alpha = 0.85f))
+                }
+                message.inboundMedia.filter { it.kind == MediaKind.Voice && it.filePath != voicePath }
+                    .forEach { media ->
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedButton(onClick = { onPlayVoice(media.filePath) }) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = null)
+                            Spacer(Modifier.size(8.dp))
+                            Text(media.name)
+                        }
+                    }
+            }
+            if (hasKeyboard && keyboard != null) {
+                Spacer(Modifier.height(6.dp))
+                TelegramInlineKeyboardBlock(
+                    keyboard = keyboard,
+                    enabled = !message.isStreaming,
+                    onClick = onInlineButton,
                 )
             }
-            val voicePath = message.localMediaPath
-                ?: message.inboundMedia.firstOrNull { it.kind == MediaKind.Voice }?.filePath
-            if (voicePath != null) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = { onPlayVoice(voicePath) }) {
-                    Icon(
-                        imageVector = if (playingPath == voicePath) Icons.Default.Stop else Icons.Default.PlayArrow,
-                        contentDescription = null
-                    )
-                    Spacer(Modifier.size(8.dp))
-                    Text(if (playingPath == voicePath) "Stop" else "Voice")
-                }
-            } else if (message.attachmentKind == MediaKind.Photo) {
-                Spacer(Modifier.height(4.dp))
-                Text("Photo: ${message.attachmentName ?: "photo"}", color = fg.copy(alpha = 0.85f))
-            } else if (message.attachmentKind == MediaKind.File) {
-                Spacer(Modifier.height(4.dp))
-                Text("File: ${message.attachmentName ?: "file"}", color = fg.copy(alpha = 0.85f))
-            }
-            message.inboundMedia.filter { it.kind == MediaKind.Voice && it.filePath != voicePath }
-                .forEach { media ->
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedButton(onClick = { onPlayVoice(media.filePath) }) {
-                        Icon(Icons.Default.PlayArrow, contentDescription = null)
-                        Spacer(Modifier.size(8.dp))
-                        Text(media.name)
-                    }
-                }
         }
+    }
+}
+
+@Composable
+private fun TelegramInlineKeyboardBlock(
+    keyboard: TelegramInlineKeyboard,
+    enabled: Boolean,
+    onClick: (TelegramInlineAction) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        keyboard.rows.forEach { row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                row.forEach { button ->
+                    TelegramInlineButtonChip(
+                        button = button,
+                        enabled = enabled,
+                        modifier = Modifier.weight(1f),
+                        onClick = { onClick(button.action) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TelegramInlineButtonChip(
+    button: TelegramInlineButton,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFF1A4550))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = button.text,
+            color = Color(0xFFE8F4F3),
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -649,8 +847,8 @@ private fun AddresseeDropdown(
 ) {
     var expanded by remember { mutableStateOf(false) }
     ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { if (enabled) expanded = !expanded },
+        expanded = expanded && enabled,
+        onExpandedChange = { next -> if (enabled) expanded = next },
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp),
@@ -667,10 +865,10 @@ private fun AddresseeDropdown(
             enabled = enabled,
             label = { Text("Адресат (MainAgent = без TO:)") },
             trailingIcon = {
-                ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
+                ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded && enabled)
             },
             modifier = Modifier
-                .menuAnchor()
+                .menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled)
                 .fillMaxWidth(),
             shape = RoundedCornerShape(18.dp),
             colors = OutlinedTextFieldDefaults.colors(
@@ -680,12 +878,13 @@ private fun AddresseeDropdown(
                 unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.35f),
                 disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                 disabledBorderColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
+                disabledLabelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                disabledTrailingIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
             ),
         )
-        DropdownMenu(
-            expanded = expanded,
+        ExposedDropdownMenu(
+            expanded = expanded && enabled,
             onDismissRequest = { expanded = false },
-            modifier = Modifier.exposedDropdownSize(matchTextFieldWidth = true),
         ) {
             addressees.forEach { addressee ->
                 DropdownMenuItem(
@@ -698,7 +897,7 @@ private fun AddresseeDropdown(
                                     addressee.displayName
                                 },
                             )
-                            if (addressee.id != Addressee.LIAISON_ID) {
+                            if (addressee.id != Addressee.MAIN_AGENT_ID) {
                                 Text(
                                     addressee.id,
                                     style = MaterialTheme.typography.labelSmall,
@@ -775,6 +974,7 @@ private fun ComposerBar(
     enabled: Boolean,
     connectHint: String,
     composerBusy: Boolean,
+    compact: Boolean,
     addressees: List<Addressee>,
     selectedAddressee: Addressee,
     defaultAddressee: Addressee,
@@ -790,8 +990,10 @@ private fun ComposerBar(
     onMic: () -> Unit
 ) {
     var showAddReceiver by remember { mutableStateOf(false) }
-    val receiverControlsEnabled = enabled && !composerBusy
-    val canDeleteCurrent = selectedAddressee.id != Addressee.LIAISON_ID
+    // Receiver list is local prefs — allow edit without Connect / Telegram login.
+    // Only block while a send/recording is in flight.
+    val receiverControlsEnabled = !composerBusy
+    val canDeleteCurrent = selectedAddressee.id != Addressee.MAIN_AGENT_ID
     if (showAddReceiver) {
         AddReceiverDialog(
             onDismiss = { showAddReceiver = false },
@@ -799,68 +1001,77 @@ private fun ComposerBar(
         )
     }
     Column(modifier = Modifier.fillMaxWidth()) {
-        AddresseeDropdown(
-            addressees = addressees,
-            selected = selectedAddressee,
-            defaultAddressee = defaultAddressee,
-            enabled = receiverControlsEnabled,
-            onSelect = onAddresseeSelect,
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedButton(
-                onClick = onDeleteCurrentReceiver,
-                enabled = receiverControlsEnabled && canDeleteCurrent,
-                modifier = Modifier.weight(1f),
-            ) {
-                Text("Delete current receiver", maxLines = 1)
-            }
-            OutlinedButton(
-                onClick = { showAddReceiver = true },
+        if (!compact) {
+            AddresseeDropdown(
+                addressees = addressees,
+                selected = selectedAddressee,
+                defaultAddressee = defaultAddressee,
                 enabled = receiverControlsEnabled,
-                modifier = Modifier.weight(1f),
+                onSelect = onAddresseeSelect,
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text("Add new receiver", maxLines = 1)
+                OutlinedButton(
+                    onClick = onDeleteCurrentReceiver,
+                    enabled = receiverControlsEnabled && canDeleteCurrent,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Delete current", maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = { showAddReceiver = true },
+                    enabled = receiverControlsEnabled,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Add new", maxLines = 1)
+                }
             }
-        }
-        OutlinedButton(
-            onClick = { onSetDefaultAddressee(selectedAddressee) },
-            enabled = receiverControlsEnabled && selectedAddressee.id != defaultAddressee.id,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp),
-        ) {
-            Text("Set as default")
+            OutlinedButton(
+                onClick = { onSetDefaultAddressee(selectedAddressee) },
+                enabled = receiverControlsEnabled && selectedAddressee.id != defaultAddressee.id,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp),
+            ) {
+                Text("Set as default")
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.Start
+            ) {
+                IconButton(onClick = onAttach, enabled = enabled) {
+                    Icon(Icons.Default.AttachFile, contentDescription = "File")
+                }
+                IconButton(onClick = onCamera, enabled = enabled) {
+                    Icon(Icons.Default.PhotoCamera, contentDescription = "Camera")
+                }
+                IconButton(onClick = onMic, enabled = enabled) {
+                    Icon(
+                        imageVector = if (isRecording) Icons.Default.MicOff else Icons.Default.Mic,
+                        contentDescription = "Voice",
+                        tint = if (isRecording) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onBackground
+                    )
+                }
+            }
+        } else {
+            Text(
+                text = "→ ${selectedAddressee.displayName}",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            )
         }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 8.dp),
-            horizontalArrangement = Arrangement.Start
-        ) {
-            IconButton(onClick = onAttach, enabled = enabled) {
-                Icon(Icons.Default.AttachFile, contentDescription = "File")
-            }
-            IconButton(onClick = onCamera, enabled = enabled) {
-                Icon(Icons.Default.PhotoCamera, contentDescription = "Camera")
-            }
-            IconButton(onClick = onMic, enabled = enabled) {
-                Icon(
-                    imageVector = if (isRecording) Icons.Default.MicOff else Icons.Default.Mic,
-                    contentDescription = "Voice",
-                    tint = if (isRecording) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onBackground
-                )
-            }
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .padding(horizontal = 12.dp, vertical = if (compact) 6.dp else 10.dp),
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -869,29 +1080,35 @@ private fun ComposerBar(
                 onValueChange = onDraftChange,
                 modifier = Modifier
                     .weight(1f)
+                    .heightIn(min = 56.dp)
                     .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown &&
-                            (event.key == Key.Enter || event.key == Key.NumPadEnter)
-                        ) {
-                            if (event.isShiftPressed) {
-                                false
-                            } else {
-                                if (enabled && draft.isNotBlank()) onSend()
-                                true
-                            }
+                        if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        if (event.key != Key.Enter && event.key != Key.NumPadEnter) {
+                            return@onPreviewKeyEvent false
+                        }
+                        // Shift+Enter → newline; Enter → send (hardware / BT keyboards).
+                        if (event.isShiftPressed) {
+                            onDraftChange(draft + "\n")
+                            true
                         } else {
-                            false
+                            if (enabled && draft.isNotBlank()) onSend()
+                            true
                         }
                     },
                 enabled = enabled,
+                singleLine = false,
                 placeholder = {
                     Text(
                         connectHint,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 },
-                maxLines = 5,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                minLines = 1,
+                maxLines = if (compact) 4 else 8,
+                keyboardOptions = KeyboardOptions(
+                    imeAction = ImeAction.Default,
+                    autoCorrectEnabled = true,
+                ),
                 keyboardActions = KeyboardActions(
                     onSend = {
                         if (enabled && draft.isNotBlank()) onSend()
@@ -902,7 +1119,11 @@ private fun ComposerBar(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
                     unfocusedBorderColor = MaterialTheme.colorScheme.outline,
                     focusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.35f)
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.35f),
+                    focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                    unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                    disabledTextColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    cursorColor = MaterialTheme.colorScheme.primary,
                 )
             )
             AnimatedVisibility(

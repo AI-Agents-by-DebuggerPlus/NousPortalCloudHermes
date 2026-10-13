@@ -19,12 +19,31 @@ data class Addressee(
 
         val MAIN_AGENT = Addressee(MAIN_AGENT_ID, "MainAgent")
 
+        const val ENGLISH_TUTOR_ID = "english_tutor"
+        const val TASK_SCHEDULER_ID = "task_scheduler"
+        const val ASSISTANT_ID = "assistant"
+        const val BIOSTACK_ID = "biostack"
+        const val ACCOUNTANT_ID = "accountant"
+        const val SYSADMIN_ID = "sysadmin"
+
+        val ENGLISH_TUTOR = Addressee(ENGLISH_TUTOR_ID, "EnglishTutor")
+        val TASK_SCHEDULER = Addressee(TASK_SCHEDULER_ID, "TaskScheduler")
+        val ASSISTANT = Addressee(ASSISTANT_ID, "Assistant")
+        val BIOSTACK = Addressee(BIOSTACK_ID, "BioStack")
+        val ACCOUNTANT = Addressee(ACCOUNTANT_ID, "Accountant")
+        val SYSADMIN = Addressee(SYSADMIN_ID, "SysAdmin")
+
         /** @deprecated use [MAIN_AGENT] */
         val LIAISON: Addressee get() = MAIN_AGENT
 
         val defaultCatalog: List<Addressee> = listOf(
             MAIN_AGENT,
-            Addressee("english_tutor", "EnglishTutor"),
+            ASSISTANT,
+            ENGLISH_TUTOR,
+            TASK_SCHEDULER,
+            BIOSTACK,
+            ACCOUNTANT,
+            SYSADMIN,
         )
 
         /** @deprecated use [defaultCatalog] or UI state list */
@@ -83,6 +102,13 @@ data class Addressee(
             val deduped = migrated
                 .groupBy { it.id }
                 .map { (_, group) -> group.first() }
+                .toMutableList()
+            // Built-ins missing from an older saved catalog (e.g. task_scheduler).
+            for (builtin in defaultCatalog) {
+                if (deduped.none { it.id.equals(builtin.id, ignoreCase = true) }) {
+                    deduped += builtin
+                }
+            }
             val hasMain = deduped.any { it.id == MAIN_AGENT_ID }
             return if (hasMain) deduped else listOf(MAIN_AGENT) + deduped.filter { it.id != MAIN_AGENT_ID }
         }
