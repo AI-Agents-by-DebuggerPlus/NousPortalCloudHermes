@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Link
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
@@ -697,7 +699,6 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                         persistAddressees(currentId = it.id)
                     },
                     compact = true,
-                    modifier = Modifier.padding(end = 4.dp),
                 )
             }
             TextButton(onClick = {
@@ -930,18 +931,50 @@ private fun AddresseeDropdown(
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    if (compact) {
+        // Match Clear / New session / Settings: TextButton chrome, no outlined field.
+        LayoutBox(modifier = modifier) {
+            TextButton(onClick = { expanded = true }) {
+                Text("To ", color = TgTheme.Secondary)
+                Text(
+                    selected.displayName,
+                    color = TgTheme.Text,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Icon(
+                    Icons.Default.ArrowDropDown,
+                    contentDescription = "Select addressee",
+                    tint = TgTheme.Text,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            DropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+                modifier = Modifier.background(TgTheme.Panel),
+            ) {
+                addressees.forEach { addressee ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(addressee.displayName, color = TgTheme.Text)
+                        },
+                        onClick = {
+                            onSelect(addressee)
+                            expanded = false
+                        },
+                    )
+                }
+            }
+        }
+        return
+    }
     ExposedDropdownMenuBox(
         expanded = expanded,
         onExpandedChange = { expanded = it },
-        modifier = if (compact) {
-            modifier.widthIn(min = 120.dp, max = 180.dp)
-        } else {
-            modifier.fillMaxWidth().padding(bottom = 4.dp)
-        },
+        modifier = modifier.fillMaxWidth().padding(bottom = 4.dp),
     ) {
-        val fieldLabel = if (compact) {
-            selected.displayName
-        } else if (selected.id == defaultAddressee.id) {
+        val fieldLabel = if (selected.id == defaultAddressee.id) {
             "${selected.displayName} (default)"
         } else {
             selected.displayName
@@ -951,22 +984,13 @@ private fun AddresseeDropdown(
             onValueChange = {},
             readOnly = true,
             singleLine = true,
-            label = if (compact) null else ({ Text("To") }),
-            prefix = if (compact) {
-                { Text("To ", color = TgTheme.Secondary, style = MaterialTheme.typography.labelSmall) }
-            } else {
-                null
-            },
+            label = { Text("To") },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            textStyle = if (compact) {
-                MaterialTheme.typography.labelLarge
-            } else {
-                MaterialTheme.typography.bodyLarge
-            },
+            textStyle = MaterialTheme.typography.bodyLarge,
             modifier = Modifier
                 .menuAnchor(MenuAnchorType.PrimaryNotEditable, true)
-                .then(if (compact) Modifier.fillMaxWidth().heightIn(max = 44.dp) else Modifier.fillMaxWidth()),
-            shape = RoundedCornerShape(if (compact) 10.dp else 14.dp),
+                .fillMaxWidth(),
+            shape = RoundedCornerShape(14.dp),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedTextColor = TgTheme.Text,
                 unfocusedTextColor = TgTheme.Text,
@@ -978,8 +1002,6 @@ private fun AddresseeDropdown(
                 unfocusedLabelColor = TgTheme.Secondary,
                 focusedTrailingIconColor = TgTheme.Text,
                 unfocusedTrailingIconColor = TgTheme.Secondary,
-                focusedPrefixColor = TgTheme.Secondary,
-                unfocusedPrefixColor = TgTheme.Secondary,
             ),
         )
         ExposedDropdownMenu(
@@ -990,23 +1012,7 @@ private fun AddresseeDropdown(
             addressees.forEach { addressee ->
                 DropdownMenuItem(
                     text = {
-                        Column {
-                            Text(
-                                if (addressee.id == defaultAddressee.id) {
-                                    "${addressee.displayName} (default)"
-                                } else {
-                                    addressee.displayName
-                                },
-                                color = TgTheme.Text,
-                            )
-                            if (addressee.id != Addressee.MAIN_AGENT_ID) {
-                                Text(
-                                    addressee.id,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = TgTheme.Secondary,
-                                )
-                            }
-                        }
+                        Text(addressee.displayName, color = TgTheme.Text)
                     },
                     onClick = {
                         onSelect(addressee)

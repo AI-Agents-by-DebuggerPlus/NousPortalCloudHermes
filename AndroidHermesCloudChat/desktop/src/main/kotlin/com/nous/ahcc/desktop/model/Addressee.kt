@@ -17,6 +17,7 @@ data class Addressee(
         val BIOSTACK = Addressee("biostack", "BioStack")
         val ACCOUNTANT = Addressee("accountant", "Accountant")
         val SYSADMIN = Addressee("sysadmin", "SysAdmin")
+        val TRADER = Addressee("trader", "Trader")
 
         val defaultCatalog: List<Addressee> = listOf(
             MAIN_AGENT,
@@ -26,6 +27,7 @@ data class Addressee(
             BIOSTACK,
             ACCOUNTANT,
             SYSADMIN,
+            TRADER,
         )
 
         val default: Addressee = MAIN_AGENT

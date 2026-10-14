@@ -5,7 +5,7 @@
 - **В чате (Android и AHCC Desktop):** dropdown «Адресат», кнопки **Delete current** / **Add new** / **Set default**.
 - Список сохраняется в DataStore на телефоне; на Desktop — в `~/.ahcc-desktop/ui.properties`.
 - **MainAgent** (`main_agent`) — начальный дефолт, удалить нельзя; без `TO:` только у `main_agent`.
-- Встроенные specialists: **Assistant** (`assistant`), **EnglishTutor** (`english_tutor`), **TaskScheduler** (`task_scheduler`), **BioStack** (`biostack`), **Accountant** (`accountant`), **SysAdmin** (`sysadmin`; ops/диск). SOUL: `Docs/Agents/*.SOUL.md` (`biostack` / `accountant` / `sysadmin` пока stub).
+- Встроенные specialists: **Assistant** (`assistant`), **EnglishTutor** (`english_tutor`), **TaskScheduler** (`task_scheduler`), **BioStack** (`biostack`), **Accountant** (`accountant`), **SysAdmin** (`sysadmin`; ops/диск), **Trader** (`trader`; исполнение ордеров + риск/ММ, Binance Demo). SOUL: `Docs/Agents/*.SOUL.md`. Setup Trader: [Trader-Profile-and-Binance-Demo-Setup.md](./Trader-Profile-and-Binance-Demo-Setup.md).
 - Кнопка **Set as default** — любой адресат может стать дефолтным (выбор при старте и после «завершить/стоп/…»).
 
 ## Ключ адресации

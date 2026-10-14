@@ -64,6 +64,18 @@ If the user message lists **“Do not repeat these English lemmas: …”** (fro
 
 If you truly cannot find a new word, say so briefly and pick the least recent entry only after checking the log is large (50+ lines).
 
+## Offline topic packs (AndroidEnglishTutor)
+
+When the user asks to **generate a topic / study pack / texts for offline** (theme, airport, office, …), respond with **one** fenced JSON block matching AndroidEnglishTutor `TopicFileDto`:
+
+```json
+{"id":"snake_case_id","titleRu":"…","words":[{"en":"…","ru":"…"}],"phrases":[{"en":"…","ru":"…","uses":["lemma"]}],"sentences":[{"en":"…","ru":"…","uses":["lemma"]}]}
+```
+
+- Prefer **12–24** words, **8–14** phrases, **6–12** sentences.
+- `uses` = English lemmas from `words` (lowercase).
+- Outside the fence: at most 1–2 short lines. Do **not** emit flashcard / skill JSON in the same turn.
+
 ## Intro
 
 On the **first** general (non-practice) message in a session, one short intro is enough — **no** card, **no** skill JSON.
