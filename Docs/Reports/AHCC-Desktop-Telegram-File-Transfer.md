@@ -1,68 +1,87 @@
 # AHCC Desktop ↔ Cloud Hermes — передача файлов (Telegram)
 
 **Дата:** 2026-10-19  
-**Версия клиента:** AHCC Desktop **1.4.26 (32)**  
-**Канал:** Telegram user session (TDLib / TDLight) → bot Cloud Hermes (например `@npch_operator_bot`)
+**Статус:** подтверждено пользователем — **двухсторонняя передача файлов работает**  
+**Версия клиента:** AHCC Desktop **1.4.28 (34)**  
+**Канал связи с агентом:** Telegram user session (TDLib / TDLight) → bot Cloud Hermes (например `@npch_operator_bot`)
+
+**Supabase** в живом пути Desktop ↔ Cloud Hermes **не участвует** (опционально: история сессии / `ahcc_files` для peer Android). Транспорт файлов к агенту и обратно — **Telegram**.
 
 ---
 
-## Проблема
+## Проблема (исходная)
 
-Двусторонняя передача файлов между **AHCC Desktop** и **Cloud Hermes** по Telegram **не работала** на исходящем пути Desktop → агент.
+Двусторонняя передача по Telegram **ломалась** на разных этапах.
 
-### Что происходило
+### 1. Desktop → агент (до 1.4.26)
 
-1. UI Desktop собирал файл (`sendPendingFile`), строил envelope `AHCC_MEDIA_V1` (base64) и короткий placeholder вида `[photo] name.png` / `[file] …`.
-2. В `DesktopChatGateway.sendMedia` для канала **Telegram** в бота уходил **только placeholder-текст**:
+1. UI собирал файл (`sendPendingFile`), строил envelope `AHCC_MEDIA_V1` и placeholder `[photo]…` / `[file]…`.
+2. `DesktopChatGateway.sendMedia` для **Telegram** отправлял **только placeholder-текст** — байты файла отбрасывались.
+3. Envelope с base64 уходил только в **HTTP SSE**. Лимит длины сообщения Telegram (~4096) не подходит для крупных base64 — нужен нативный `photo`/`document`.
+4. Текстовые файлы: upload в Supabase + notify `Shared file via Supabase: …` **без** документа в Telegram → агент видел имя, не содержимое.
 
-```kotlin
-// было (сломано)
-sendMessage(historyPlaceholder)  // без байтов файла
-```
+### 2. Агент → Desktop (до 1.4.27)
 
-3. Полный envelope с данными уходил только в канал **HTTP SSE**. Лимит Telegram на длину сообщения (~4096) всё равно не позволил бы слать 2 MiB base64 текстом — нужен был нативный `photo`/`document`.
-4. Для текстовых файлов (`.md` / `.txt` / …) файл клался в Supabase (`ahcc_files`), а боту уходило лишь уведомление `Shared file via Supabase: …` **без** самого документа.
+- Входящие `MessagePhoto` / `MessageDocument` обрабатывались слабо: часто только caption; файл не сохранялся локально и не открывался из чата.
+- Пользователь видел файл в Telegram Desktop / у агента, но не в AHCC Desktop.
 
-Итог: агент на Cloud видел подпись/маркер, но **не получал файл**; обратный путь (agent → Desktop) мог уже работать, исходящий — нет.
+### 3. Ложные «входящие» (до 1.4.28)
+
+- TDLib видит **весь** аккаунт пользователя. Автосохранение медиа шло **из любых чатов/каналов**, не только watched AHCC-ботов → в `Incoming` попадали чужие графики (например торговые), которых не было в чате Operator.
 
 ---
 
 ## Решение
 
-### Telegram: реальная отправка через TDLib
+### Исходящие (1.4.26) — `sendLocalFileAndWaitReply`
 
-1. В `DesktopTelegramUserSession` добавлен `sendLocalFileAndWaitReply`:
+1. `DesktopTelegramUserSession.sendLocalFileAndWaitReply`:
    - изображения → `InputMessagePhoto` / `InputPhoto` + `InputFileLocal`;
    - остальное → `InputMessageDocument` / `InputDocument` + `InputFileLocal`;
-   - caption = placeholder / notify (до 1024 символов);
-   - далее тот же wait-for-reply, что и у текстовых сообщений.
+   - caption ≤ 1024; далее тот же wait-for-reply, что у текста.
+2. `DesktopChatGateway.sendMedia(localPath, asPhoto)`:
+   - **Telegram** → TDLib photo/document;
+   - **HTTP SSE** → `AHCC_MEDIA_V1` envelope.
+3. Текстовый путь: после Supabase (если настроен) всё равно шлётся **локальный файл** документом боту.
 
-2. `DesktopChatGateway.sendMedia` принимает `localPath` и `asPhoto`:
-   - **Telegram** → TDLib photo/document по пути на диске;
-   - **HTTP SSE** → по-прежнему `AHCC_MEDIA_V1` envelope в теле запроса.
+### Входящие (1.4.27)
 
-3. `Main.sendPendingFile`:
-   - бинарный путь передаёт `file.absolutePath` в `sendMedia`;
-   - текстовый путь после upload в Supabase тоже шлёт **локальный файл** документом боту (не notify-only).
+1. Настройка **Settings → Connection → Save received files to** (`DesktopUiSettings.inboundFilesDir`, по умолчанию `~/AHCC-Downloads`).
+2. Download через TDLib `DownloadFile` → копия в выбранную папку.
+3. В пузырях исходящих и входящих: **📎 имя — Open** (`localAttachmentPath` / `attachmentName` на `ChatMessage`).
 
-### Проверка
+### Только watched-боты (1.4.28)
 
-После 1.4.26 подтверждено: **двухсторонняя** передача файлов AHCC Desktop ⇔ Cloud Hermes по Telegram работает.
+1. `onIncoming` / `downloadAndSaveInbound` — **только** `isWatchedChat` (addressee-боты).
+2. В лог при сохранении: `bot=@… chatId=… msgId=… kind=…` — чтобы сверять источник.
+3. В `telegram-raw` логируются и медиа без caption.
 
 ---
 
-## Связанные правки той же линии Desktop (контекст)
+## Проверка (факт)
 
-| Тема | Версия / место |
-|------|----------------|
-| Кликабельные `https://` и markdown-ссылки в пузырях | 1.4.24, `MessageContentBlocks.kt` |
-| Shift+Enter: `\n` в позиции каретки | 1.4.25, `TextFieldValue` в `Main.kt` |
-| Отправка файлов Telegram | **1.4.26**, этот отчёт |
+| Направление | Результат |
+|-------------|-----------|
+| Desktop → Cloud Hermes (текст/файл, в т.ч. тест код + сумма + возврат файла) | OK |
+| Cloud Hermes → Desktop (документ/фото в чат + сохранение + Open) | OK |
+| Чужие каналы/чаты аккаунта не должны писать в inbound (после 1.4.28) | OK (by design) |
+
+---
+
+## Версии линии
+
+| Версия | Что |
+|--------|-----|
+| 1.4.24 | Кликабельные ссылки в пузырях |
+| 1.4.25 | Shift+Enter — newline в позиции каретки |
+| 1.4.26 | Исходящие файлы через TDLib photo/document |
+| 1.4.27 | Папка inbound + Open в чате |
+| **1.4.28** | Inbound только от watched-ботов + лог источника |
 
 ---
 
 ## Ограничения
 
-- Клиентский лимит бинарного пути Desktop: **~2 MiB** (`DesktopMediaEnvelope.MAX_FILE_BYTES`).
-- Агент должен уметь принимать Telegram photo/document (типичное поведение Cloud Hermes / Operator).
-- Inline-кнопки approve (Allow Once / Session / Deny) — отдельная тема UI markup; к передаче файлов не относится.
+- Лимит бинарного пути Desktop: **~2 MiB** (`DesktopMediaEnvelope.MAX_FILE_BYTES`) для envelope/HTTP; Telegram document/photo — лимиты TDLib/Telegram.
+- Читать произвольные каналы/группы, на которые подписан пользователь, AHCC Desktop **умеет на уровне TDLib**, но **намеренно не делает** этого в UI/inbound (только watched-боты). Белый список каналов — отдельная фича, не реализована.
+- Inline-кнопки approve (Allow Once / Session / Deny) — отдельная тема markup UI.

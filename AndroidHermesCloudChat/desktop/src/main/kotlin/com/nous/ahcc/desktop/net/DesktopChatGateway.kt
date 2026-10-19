@@ -207,11 +207,13 @@ class DesktopChatGateway {
         } else {
             reply.text
         }
+        val attachment = reply.attachment ?: telegram.takePendingAttachment()
         _responses.emit(
             HermesResponse(
                 event = "done",
                 content = display,
                 inlineKeyboard = fallback,
+                attachment = attachment,
             )
         )
     }

@@ -14,11 +14,20 @@ data class ChatMessage(
     /** True after a finished assistant turn (Telegram-style “delivered”). */
     val isComplete: Boolean = false,
     val inlineKeyboard: TelegramInlineKeyboard? = null,
+    /** Local path for an attached file (sent or downloaded inbound). */
+    val localAttachmentPath: String? = null,
+    val attachmentName: String? = null,
+)
+
+data class ChatAttachmentRef(
+    val localPath: String,
+    val displayName: String,
 )
 
 data class TelegramReply(
     val text: String,
     val keyboard: TelegramInlineKeyboard? = null,
+    val attachment: ChatAttachmentRef? = null,
 )
 
 data class ConnectionConfig(
@@ -55,6 +64,8 @@ data class HermesResponse(
     val history: List<HermesHistoryItem>? = null,
     @kotlinx.serialization.Transient
     val inlineKeyboard: TelegramInlineKeyboard? = null,
+    @kotlinx.serialization.Transient
+    val attachment: ChatAttachmentRef? = null,
 )
 
 @kotlinx.serialization.Serializable

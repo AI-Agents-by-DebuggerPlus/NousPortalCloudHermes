@@ -363,7 +363,7 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
     }
 
     LaunchedEffect(Unit) {
-        client.telegram.setInboundPush { botUsername, chunk, keyboard ->
+        client.telegram.setInboundPush { botUsername, chunk, keyboard, attachment ->
             val addr = findAddresseeByBot(botUsername) ?: currentAddressee
             mutateMessages(addr.id) { prev ->
                 val list = prev.toMutableList()
@@ -378,6 +378,8 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     list[idx] = old.copy(
                         content = (old.content + "\n\n" + chunk).trim(),
                         inlineKeyboard = nextKb,
+                        localAttachmentPath = attachment?.localPath ?: old.localAttachmentPath,
+                        attachmentName = attachment?.displayName ?: old.attachmentName,
                     )
                 } else {
                     list += ChatMessage(
@@ -387,6 +389,8 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                         isStreaming = false,
                         isComplete = true,
                         inlineKeyboard = keyboard,
+                        localAttachmentPath = attachment?.localPath,
+                        attachmentName = attachment?.displayName,
                     )
                 }
                 list
@@ -498,6 +502,7 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                         .lastOrNull { it.role == MessageRole.Assistant }?.content.orEmpty()
                     val finalText = response.content?.takeIf { it.isNotBlank() } ?: streamed
                     val keyboard = response.inlineKeyboard
+                    val attachment = response.attachment
                     mutateMessages(targetId) { prev ->
                         prev.map {
                             if (it.isStreaming) {
@@ -506,6 +511,8 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                                     isStreaming = false,
                                     isComplete = true,
                                     inlineKeyboard = keyboard,
+                                    localAttachmentPath = attachment?.localPath ?: it.localAttachmentPath,
+                                    attachmentName = attachment?.displayName ?: it.attachmentName,
                                 )
                             } else it
                         }
@@ -708,14 +715,21 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     mutateMessages {
                         it +
                             ChatMessage(
-                                UUID.randomUUID().toString(),
-                                MessageRole.User,
-                                buildString {
+                                id = UUID.randomUUID().toString(),
+                                role = MessageRole.User,
+                                content = buildString {
                                     if (!caption.isNullOrBlank()) append(caption).append('\n')
                                     append("[file] $label")
                                 },
+                                localAttachmentPath = file.absolutePath,
+                                attachmentName = fileName,
                             ) +
-                            ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", true)
+                            ChatMessage(
+                                id = UUID.randomUUID().toString(),
+                                role = MessageRole.Assistant,
+                                content = "",
+                                isStreaming = true,
+                            )
                     }
                     // Telegram: send the real file (not notify-only). SSE: text notify is enough
                     // if the agent reads Supabase; still attach path so Telegram bots get bytes.
@@ -736,8 +750,19 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                 awaitingAddresseeId = currentAddressee.id
                 mutateMessages {
                     it +
-                        ChatMessage(UUID.randomUUID().toString(), MessageRole.User, placeholder) +
-                        ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", true)
+                        ChatMessage(
+                            id = UUID.randomUUID().toString(),
+                            role = MessageRole.User,
+                            content = placeholder,
+                            localAttachmentPath = file.absolutePath,
+                            attachmentName = file.name,
+                        ) +
+                        ChatMessage(
+                            id = UUID.randomUUID().toString(),
+                            role = MessageRole.Assistant,
+                            content = "",
+                            isStreaming = true,
+                        )
                 }
                 withContext(Dispatchers.IO) {
                     supabase().insert(
@@ -1396,6 +1421,48 @@ private fun SettingsPanel(
                         Checkbox(checked = startOnLaunch, onCheckedChange = onStartOnLaunchChange)
                         Text("Start on launch", color = TgTheme.Text)
                     }
+                    var inboundDir by remember {
+                        mutableStateOf(DesktopUiSettings.inboundFilesDir)
+                    }
+                    Text("Inbound files folder", style = MaterialTheme.typography.titleSmall, color = TgTheme.Text)
+                    Text(
+                        "Telegram files from agents are saved here automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TgTheme.Secondary,
+                    )
+                    LayoutRow(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        CompactField(
+                            value = inboundDir,
+                            onValueChange = {
+                                inboundDir = it
+                                DesktopUiSettings.inboundFilesDir = it
+                            },
+                            label = "Save received files to",
+                            width = 360.dp,
+                        )
+                        TextButton(
+                            onClick = {
+                                val chooser = javax.swing.JFileChooser().apply {
+                                    fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
+                                    dialogTitle = "Choose inbound files folder"
+                                    currentDirectory = java.io.File(inboundDir).takeIf { it.isDirectory }
+                                        ?: java.io.File(DesktopUiSettings.defaultInboundFilesDir())
+                                }
+                                val result = chooser.showOpenDialog(null)
+                                if (result == javax.swing.JFileChooser.APPROVE_OPTION) {
+                                    val picked = chooser.selectedFile?.absolutePath ?: return@TextButton
+                                    inboundDir = picked
+                                    DesktopUiSettings.inboundFilesDir = picked
+                                    runCatching { java.io.File(picked).mkdirs() }
+                                }
+                            },
+                        ) {
+                            Text("Browse…", color = TgTheme.Text)
+                        }
+                    }
                     CompactField(
                         value = config.sessionId,
                         onValueChange = { onChange(config.copy(sessionId = it)) },
@@ -1702,8 +1769,31 @@ private fun MessageBubble(
                     TypingDots(color = fg)
                 } else if (message.content.isNotBlank()) {
                     MessageBody(text = message.content, color = fg)
-                } else {
+                } else if (message.localAttachmentPath.isNullOrBlank()) {
                     Text("…", color = TgTheme.Secondary)
+                }
+                val attachPath = message.localAttachmentPath
+                if (!attachPath.isNullOrBlank()) {
+                    val label = message.attachmentName ?: java.io.File(attachPath).name
+                    LayoutSpacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "📎 $label — Open",
+                        color = TgTheme.Accent,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable {
+                                runCatching {
+                                    val f = java.io.File(attachPath)
+                                    if (f.isFile) {
+                                        java.awt.Desktop.getDesktop().open(f)
+                                    } else {
+                                        java.awt.Desktop.getDesktop().open(f.parentFile ?: f)
+                                    }
+                                }
+                            }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
                 }
             }
             if (hasKeyboard && keyboard != null) {

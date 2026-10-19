@@ -1,6 +1,8 @@
 package com.nous.ahcc.desktop.telegram
 
+import com.nous.ahcc.desktop.config.DesktopUiSettings
 import com.nous.ahcc.desktop.log.DesktopChatLog
+import com.nous.ahcc.desktop.model.ChatAttachmentRef
 import com.nous.ahcc.desktop.model.TelegramInlineAction
 import com.nous.ahcc.desktop.model.TelegramInlineButton
 import com.nous.ahcc.desktop.model.TelegramInlineKeyboard
@@ -29,8 +31,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
@@ -58,28 +62,36 @@ class DesktopTelegramUserSession {
     private val replyLock = Any()
     private val replyParts = linkedMapOf<Long, String>()
     private val replyMarkups = linkedMapOf<Long, TelegramInlineKeyboard>()
+    private val replyAttachments = linkedMapOf<Long, ChatAttachmentRef>()
     private val outgoingIds = ConcurrentHashMap.newKeySet<Long>()
     private var replyWaiter: CompletableDeferred<TelegramReply>? = null
     private var onReply: ((String) -> Unit)? = null
     private var quietJob: Job? = null
     private var pendingInlineKeyboard: TelegramInlineKeyboard? = null
+    private var pendingAttachment: ChatAttachmentRef? = null
     /**
      * Push from any registered bot when not inside wait-reply for that chat
      * (late appends + messages while another addressee is selected).
-     * Args: botUsername, text, keyboard.
+     * Args: botUsername, text, keyboard, optional saved attachment.
      */
-    private var inboundPush: ((String, String, TelegramInlineKeyboard?) -> Unit)? = null
+    private var inboundPush: ((String, String, TelegramInlineKeyboard?, ChatAttachmentRef?) -> Unit)? = null
     private var idleAppendUntilMs: Long = 0L
 
     val isReady: Boolean get() = _auth.value is DesktopTelegramAuth.Ready
 
-    fun setInboundPush(handler: ((String, String, TelegramInlineKeyboard?) -> Unit)?) {
+    fun setInboundPush(handler: ((String, String, TelegramInlineKeyboard?, ChatAttachmentRef?) -> Unit)?) {
         inboundPush = handler
     }
 
     /** @deprecated use [setInboundPush] */
     fun setIdleAppend(handler: ((String, TelegramInlineKeyboard?) -> Unit)?) {
-        inboundPush = handler?.let { h -> { _, text, kb -> h(text, kb) } }
+        inboundPush = handler?.let { h -> { _, text, kb, _ -> h(text, kb) } }
+    }
+
+    fun takePendingAttachment(): ChatAttachmentRef? {
+        val a = pendingAttachment
+        pendingAttachment = null
+        return a
     }
 
     fun takePendingInlineKeyboard(): TelegramInlineKeyboard? {
@@ -186,9 +198,11 @@ class DesktopTelegramUserSession {
         synchronized(replyLock) {
             replyParts.clear()
             replyMarkups.clear()
+            replyAttachments.clear()
             outgoingIds.clear()
         }
         pendingInlineKeyboard = null
+        pendingAttachment = null
         quietJob?.cancel()
         onReply = onUpdate
         replyWaiter = waiter
@@ -207,10 +221,11 @@ class DesktopTelegramUserSession {
             } catch (_: Exception) {
                 val partial = snapshot()
                 if (partial.isBlank()) error("No text reply within 3 minutes")
-                TelegramReply(partial, keyboardForCurrentReply())
+                TelegramReply(partial, keyboardForCurrentReply(), attachmentForCurrentReply())
             }
         } finally {
             pendingInlineKeyboard = synchronized(replyLock) { keyboardForCurrentReply() }
+            pendingAttachment = synchronized(replyLock) { attachmentForCurrentReply() }
             replyWaiter = null
             onReply = null
             quietJob?.cancel()
@@ -237,9 +252,11 @@ class DesktopTelegramUserSession {
         synchronized(replyLock) {
             replyParts.clear()
             replyMarkups.clear()
+            replyAttachments.clear()
             outgoingIds.clear()
         }
         pendingInlineKeyboard = null
+        pendingAttachment = null
         quietJob?.cancel()
         onReply = onUpdate
         replyWaiter = waiter
@@ -269,10 +286,11 @@ class DesktopTelegramUserSession {
             } catch (_: Exception) {
                 val partial = snapshot()
                 if (partial.isBlank()) error("No text reply within 3 minutes")
-                TelegramReply(partial, keyboardForCurrentReply())
+                TelegramReply(partial, keyboardForCurrentReply(), attachmentForCurrentReply())
             }
         } finally {
             pendingInlineKeyboard = synchronized(replyLock) { keyboardForCurrentReply() }
+            pendingAttachment = synchronized(replyLock) { attachmentForCurrentReply() }
             replyWaiter = null
             onReply = null
             quietJob?.cancel()
@@ -293,8 +311,10 @@ class DesktopTelegramUserSession {
         synchronized(replyLock) {
             replyParts.clear()
             replyMarkups.clear()
+            replyAttachments.clear()
             outgoingIds.clear()
         }
+        pendingAttachment = null
         quietJob?.cancel()
         onReply = onUpdate
         replyWaiter = waiter
@@ -311,10 +331,11 @@ class DesktopTelegramUserSession {
             } catch (_: Exception) {
                 val partial = snapshot()
                 if (partial.isBlank()) error("No reply after button press")
-                TelegramReply(partial, keyboardForCurrentReply())
+                TelegramReply(partial, keyboardForCurrentReply(), attachmentForCurrentReply())
             }
         } finally {
             pendingInlineKeyboard = synchronized(replyLock) { keyboardForCurrentReply() }
+            pendingAttachment = synchronized(replyLock) { attachmentForCurrentReply() }
             replyWaiter = null
             onReply = null
             quietJob?.cancel()
@@ -344,7 +365,7 @@ class DesktopTelegramUserSession {
             }
             builder.addUpdateHandler(TdApi.UpdateMessageContent::class.java) { upd ->
                 logRawTelegram(upd.chatId, upd.messageId, upd.newContent, note = "edited")
-                acceptText(upd.chatId, upd.messageId, textOf(upd.newContent), keyboard = null)
+                acceptText(upd.chatId, upd.messageId, textOf(upd.newContent), keyboard = null, attachment = null)
             }
             val authSupplier: SimpleAuthenticationSupplier<*> = AuthenticationSupplier.user(phone)
             client = builder.build(authSupplier)
@@ -389,12 +410,91 @@ class DesktopTelegramUserSession {
             outgoingIds.add(message.id)
             return
         }
+        // Only watched AHCC bots — never auto-save media from unrelated Telegram chats.
+        if (!isWatchedChat(message.chatId)) return
         logRawTelegram(message.chatId, message.id, message.content, note = "new")
         val keyboard = parseInlineKeyboard(message)
         if (keyboard != null) {
             synchronized(replyLock) { replyMarkups[message.id] = keyboard }
         }
-        acceptText(message.chatId, message.id, textOf(message.content), keyboard)
+        scope.launch {
+            val attachment = runCatching { downloadAndSaveInbound(message) }.getOrNull()
+            val caption = textOf(message.content)?.trim().orEmpty()
+            val text = when {
+                caption.isNotEmpty() -> caption
+                attachment != null -> "[file] ${attachment.displayName}"
+                else -> ""
+            }
+            if (text.isEmpty() && keyboard == null && attachment == null) return@launch
+            acceptText(message.chatId, message.id, text, keyboard, attachment)
+        }
+    }
+
+    private suspend fun downloadAndSaveInbound(message: TdApi.Message): ChatAttachmentRef? {
+        if (!isWatchedChat(message.chatId)) return null
+        val c = client ?: return null
+        val (fileId, suggestedName) = fileRefOf(message.content) ?: return null
+        val bot = botUsernameForChat(message.chatId).ifBlank { "?" }
+        val kind = message.content?.javaClass?.simpleName?.removePrefix("Message") ?: "?"
+        val downloaded = withContext(Dispatchers.IO) {
+            c.send(TdApi.DownloadFile(fileId, 32, 0, 0, true)).get() as? TdApi.File
+        } ?: return null
+        val src = downloaded.local?.path?.takeIf { it.isNotBlank() } ?: return null
+        val destDir = File(DesktopUiSettings.inboundFilesDir).also { it.mkdirs() }
+        val dest = uniqueInboundFile(destDir, suggestedName)
+        withContext(Dispatchers.IO) {
+            Files.copy(Path.of(src), dest.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
+        DesktopChatLog.system(
+            sessionId = "-",
+            text = "Saved inbound file → ${dest.absolutePath} " +
+                "(bot=@$bot chatId=${message.chatId} msgId=${message.id} kind=$kind fileId=$fileId)",
+        )
+        return ChatAttachmentRef(localPath = dest.absolutePath, displayName = dest.name)
+    }
+
+    private fun fileRefOf(content: TdApi.MessageContent?): Pair<Int, String>? = when (content) {
+        is TdApi.MessageDocument -> {
+            val doc = content.document ?: return null
+            val file = doc.document ?: return null
+            val name = doc.fileName?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "document_${file.id}.bin"
+            file.id to name
+        }
+        is TdApi.MessagePhoto -> {
+            val sizes = content.photo?.sizes ?: return null
+            val best = sizes.maxByOrNull { s -> s.photo?.expectedSize ?: 0 } ?: return null
+            val file = best.photo ?: return null
+            file.id to "photo_${file.id}.jpg"
+        }
+        is TdApi.MessageAudio -> {
+            val audio = content.audio ?: return null
+            val file = audio.audio ?: return null
+            val name = audio.fileName?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "audio_${file.id}.mp3"
+            file.id to name
+        }
+        is TdApi.MessageAnimation -> {
+            val anim = content.animation ?: return null
+            val file = anim.animation ?: return null
+            val name = anim.fileName?.trim()?.takeIf { it.isNotEmpty() }
+                ?: "animation_${file.id}.mp4"
+            file.id to name
+        }
+        else -> null
+    }
+
+    private fun uniqueInboundFile(dir: File, suggestedName: String): File {
+        val safe = suggestedName.replace(Regex("""[\\/:*?"<>|]"""), "_").ifBlank { "file.bin" }
+        val base = File(safe).nameWithoutExtension.ifBlank { "file" }
+        val ext = File(safe).extension.let { if (it.isBlank()) "" else ".$it" }
+        var candidate = File(dir, "$base$ext")
+        var n = 1
+        while (candidate.exists()) {
+            candidate = File(dir, "${base}_$n$ext")
+            n++
+        }
+        return candidate
     }
 
     /** Persist TDLib plain text + entities exactly as received (before UI heuristics). */
@@ -407,15 +507,17 @@ class DesktopTelegramUserSession {
         if (!isWatchedChat(chatId)) return
         val (kind, ft) = formattedOf(content) ?: return
         val plain = ft.text.orEmpty()
-        if (plain.isEmpty() && (ft.entities == null || ft.entities.isEmpty())) return
+        val isMedia = kind != "MessageText"
+        if (plain.isEmpty() && !isMedia && (ft.entities == null || ft.entities.isEmpty())) return
+        val bot = botUsernameForChat(chatId)
         DesktopChatLog.telegramRaw(
             chatId = chatId,
             messageId = messageId,
             contentKind = kind,
-            plainText = plain,
+            plainText = if (plain.isEmpty() && isMedia) "[$kind bot=@$bot]" else plain,
             entitiesDump = dumpEntities(plain, ft.entities),
             markdownProjection = formatFormattedText(ft).orEmpty(),
-            note = note,
+            note = if (bot.isNotBlank()) "$note bot=@$bot" else note,
         )
     }
 
@@ -428,8 +530,19 @@ class DesktopTelegramUserSession {
     private fun formattedOf(content: TdApi.MessageContent?): Pair<String, TdApi.FormattedText>? {
         return when (content) {
             is TdApi.MessageText -> content.text?.let { "MessageText" to it }
-            is TdApi.MessagePhoto -> content.caption?.let { "MessagePhoto" to it }
-            is TdApi.MessageDocument -> content.caption?.let { "MessageDocument" to it }
+            is TdApi.MessagePhoto -> {
+                val cap = content.caption ?: TdApi.FormattedText("", emptyArray())
+                "MessagePhoto" to cap
+            }
+            is TdApi.MessageDocument -> {
+                val name = content.document?.fileName.orEmpty()
+                val cap = content.caption
+                if (cap != null && !cap.text.isNullOrBlank()) {
+                    "MessageDocument" to cap
+                } else {
+                    "MessageDocument" to TdApi.FormattedText("[document] $name", emptyArray())
+                }
+            }
             is TdApi.MessageAnimation -> content.caption?.let { "MessageAnimation" to it }
             else -> null
         }
@@ -473,6 +586,7 @@ class DesktopTelegramUserSession {
         messageId: Long,
         raw: String?,
         keyboard: TelegramInlineKeyboard?,
+        attachment: ChatAttachmentRef? = null,
     ) {
         if (!isWatchedChat(chatId)) return
         if (messageId in outgoingIds) return
@@ -481,43 +595,54 @@ class DesktopTelegramUserSession {
         val waiter = replyWaiter
         val activeChat = botChatId
         val forActiveWait = waiter != null && (activeChat == 0L || chatId == activeChat)
+        if (attachment != null) {
+            synchronized(replyLock) { replyAttachments[messageId] = attachment }
+        }
         if (!forActiveWait) {
             if (keyboard != null && (activeChat == 0L || chatId == activeChat)) {
                 pendingInlineKeyboard = keyboard
             }
-            if (text.isNotEmpty() || keyboard != null) {
+            if (attachment != null && (activeChat == 0L || chatId == activeChat)) {
+                pendingAttachment = attachment
+            }
+            if (text.isNotEmpty() || keyboard != null || attachment != null) {
                 val now = System.currentTimeMillis()
                 if (text.isNotEmpty() && looksLikeStillWorking(text) && chatId == activeChat) {
                     idleAppendUntilMs = now + IDLE_APPEND_MS
                 }
                 // Push to UI for this bot (late append or background agent).
-                if (text.isNotEmpty()) {
+                if (text.isNotEmpty() || attachment != null) {
+                    val pushText = text.ifBlank { "[file] ${attachment?.displayName.orEmpty()}" }
                     if (chatId == activeChat && now < idleAppendUntilMs) {
-                        inboundPush?.invoke(bot, text, keyboard)
+                        inboundPush?.invoke(bot, pushText, keyboard, attachment)
                     } else if (chatId != activeChat || waiter == null) {
-                        inboundPush?.invoke(bot, text, keyboard)
+                        inboundPush?.invoke(bot, pushText, keyboard, attachment)
                     }
                 }
             }
             return
         }
-        if (text.isEmpty() && keyboard == null) return
+        if (text.isEmpty() && keyboard == null && attachment == null) return
         val shown = synchronized(replyLock) {
             if (text.isNotEmpty()) replyParts[messageId] = text
             replyParts.values.joinToString("\n\n")
         }
         if (shown.isNotEmpty()) onReply?.invoke(shown)
         val hasKeyboard = keyboard != null || synchronized(replyLock) { replyMarkups.isNotEmpty() }
+        val hasAttachment = attachment != null || synchronized(replyLock) { replyAttachments.isNotEmpty() }
         quietJob?.cancel()
-        if (shown.isBlank() && !hasKeyboard) return
+        if (shown.isBlank() && !hasKeyboard && !hasAttachment) return
         // Keep waiting through tool cards AND Hermes status bubbles
         // ("Agent is running", "Working — N min") until real prose arrives.
         quietJob = scope.launch {
             var rounds = 0
             while (rounds < MAX_QUIET_ROUNDS) {
                 val latestBefore = snapshot()
+                val attachNow = attachmentForCurrentReply()
                 val quietMs = when {
                     hasKeyboard && latestBefore.isNotEmpty() && !looksLikeStillWorking(latestBefore) ->
+                        KEYBOARD_QUIET_MS
+                    attachNow != null && latestBefore.isNotEmpty() && !looksLikeStillWorking(latestBefore) ->
                         KEYBOARD_QUIET_MS
                     looksLikeStillWorking(latestBefore) -> TOOL_QUIET_MS
                     else -> QUIET_MS
@@ -525,26 +650,35 @@ class DesktopTelegramUserSession {
                 delay(quietMs)
                 if (replyWaiter !== waiter || waiter.isCompleted) return@launch
                 val latest = snapshot()
-                if (latest.isBlank()) return@launch
+                val attach = attachmentForCurrentReply()
+                if (latest.isBlank() && attach == null) return@launch
                 if (looksLikeStillWorking(latest)) {
                     rounds++
                     continue
                 }
                 // Only keyboard attached to this turn's prose message — never
                 // fall back to an older bot menu / digit pad from replyMarkups.
-                if (hasSubstantialProse(latest)) {
-                    waiter.complete(TelegramReply(latest, keyboardForCurrentReply()))
+                if (hasSubstantialProse(latest) || attach != null) {
+                    waiter.complete(
+                        TelegramReply(
+                            latest.ifBlank { "[file] ${attach?.displayName.orEmpty()}" },
+                            keyboardForCurrentReply(),
+                            attach,
+                        ),
+                    )
                     return@launch
                 }
                 // Short non-status, non-tool text (e.g. one-line intro) — accept
                 // after one quiet window; keyboards alone never finish the turn.
                 if (rounds >= 1 && latest.isNotBlank()) {
-                    waiter.complete(TelegramReply(latest, keyboardForCurrentReply()))
+                    waiter.complete(TelegramReply(latest, keyboardForCurrentReply(), attach))
                     return@launch
                 }
                 rounds++
             }
-            waiter.complete(TelegramReply(snapshot(), keyboardForCurrentReply()))
+            waiter.complete(
+                TelegramReply(snapshot(), keyboardForCurrentReply(), attachmentForCurrentReply()),
+            )
         }
     }
 
@@ -633,6 +767,12 @@ class DesktopTelegramUserSession {
                 ?: newestFirst.firstOrNull { (_, text) ->
                     !looksLikeStillWorking(text) && text.isNotBlank()
                 }?.let { (id, _) -> replyMarkups[id] }
+                ?: replyAttachments.keys.lastOrNull()?.let { replyMarkups[it] }
+        }
+
+    private fun attachmentForCurrentReply(): ChatAttachmentRef? =
+        synchronized(replyLock) {
+            replyAttachments.entries.lastOrNull()?.value
         }
 
     private fun snapshot(): String = synchronized(replyLock) {

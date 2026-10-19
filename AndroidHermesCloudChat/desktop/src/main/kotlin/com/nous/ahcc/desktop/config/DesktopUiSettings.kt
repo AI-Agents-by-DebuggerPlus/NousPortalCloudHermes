@@ -19,6 +19,19 @@ object DesktopUiSettings {
             save(props)
         }
 
+    /** Folder where inbound Telegram files (from agents) are saved automatically. */
+    var inboundFilesDir: String
+        get() = load().getProperty("inboundFilesDir", defaultInboundFilesDir()).orEmpty()
+            .ifBlank { defaultInboundFilesDir() }
+        set(value) {
+            val props = load()
+            props.setProperty("inboundFilesDir", value.trim())
+            save(props)
+        }
+
+    fun defaultInboundFilesDir(): String =
+        File(System.getProperty("user.home"), "AHCC-Downloads").absolutePath
+
     var sessionId: String
         get() = load().getProperty("sessionId", "").orEmpty()
         set(value) {
