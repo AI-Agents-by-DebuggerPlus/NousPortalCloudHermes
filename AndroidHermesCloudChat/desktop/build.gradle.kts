@@ -5,8 +5,8 @@ plugins {
     id("org.jetbrains.compose")
 }
 
-val ahccDesktopVersion = "1.4.12"
-val ahccDesktopVersionCode = 18
+val ahccDesktopVersion = "1.4.26"
+val ahccDesktopVersionCode = 32
 
 kotlin {
     jvmToolchain(21)

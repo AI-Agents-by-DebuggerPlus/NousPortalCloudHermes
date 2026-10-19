@@ -102,6 +102,20 @@ class DesktopChatGateway {
         http.clearHistory()
     }
 
+    /** Point the active Telegram session at another bot username (per-addressee). */
+    fun switchTelegramBot(botUsername: String) {
+        if (channel != ChatChannel.Telegram) return
+        val next = botUsername.trim().removePrefix("@")
+        currentConfig = currentConfig?.copy(telegramBotUsername = next)
+        telegram.setBotUsername(next)
+    }
+
+    /** Watch several bots at once (resolve chat ids). */
+    fun registerTelegramBots(usernames: Collection<String>) {
+        if (channel != ChatChannel.Telegram) return
+        telegram.registerBots(usernames)
+    }
+
     suspend fun sendMessage(text: String) {
         when (channel) {
             ChatChannel.HttpSse -> http.sendMessage(text)
@@ -115,11 +129,38 @@ class DesktopChatGateway {
         }
     }
 
-    suspend fun sendMedia(envelopeText: String, historyPlaceholder: String) {
+    /**
+     * @param localPath absolute path for Telegram: sends real photo/document via TDLib.
+     *   HTTP SSE still uses [envelopeText] (AHCC_MEDIA_V1 base64). Without [localPath],
+     *   Telegram falls back to placeholder text only (legacy / broken for binaries).
+     */
+    suspend fun sendMedia(
+        envelopeText: String,
+        historyPlaceholder: String,
+        localPath: String? = null,
+        asPhoto: Boolean = false,
+    ) {
         when (channel) {
             ChatChannel.HttpSse -> http.sendMedia(envelopeText, historyPlaceholder)
             ChatChannel.Telegram -> {
-                sendMessage(historyPlaceholder.ifBlank { envelopeText.take(500) })
+                val path = localPath?.takeIf { it.isNotBlank() }
+                if (path == null) {
+                    sendMessage(historyPlaceholder.ifBlank { envelopeText.take(500) })
+                } else {
+                    emitTelegramReply(
+                        telegram.sendLocalFileAndWaitReply(
+                            path = path,
+                            caption = historyPlaceholder.ifBlank {
+                                java.io.File(path).name
+                            },
+                            asPhoto = asPhoto,
+                        ) { partial ->
+                            scope.launch {
+                                _responses.emit(HermesResponse(event = "partial", content = partial))
+                            }
+                        }
+                    )
+                }
             }
         }
     }
@@ -156,9 +197,11 @@ class DesktopChatGateway {
     }
 
     private suspend fun emitTelegramReply(reply: TelegramReply) {
+        // Prefer keyboard that arrived with this turn's reply; do not invent menus.
         val live = reply.keyboard?.takeIf { !it.isEmpty }
             ?: telegram.takePendingInlineKeyboard()?.takeIf { !it.isEmpty }
-        val fallback = live ?: TelegramInlineKeyboardParser.fromTextFallback(reply.text)
+        val fallback = live
+            ?: TelegramInlineKeyboardParser.fromTextFallback(reply.text)
         val display = if (fallback != null) {
             TelegramInlineKeyboardParser.stripFallbackLine(reply.text)
         } else {

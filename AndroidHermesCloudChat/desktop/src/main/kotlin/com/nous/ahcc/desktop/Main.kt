@@ -78,6 +78,8 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
@@ -85,6 +87,7 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.nous.ahcc.desktop.config.DesktopUiSettings
 import com.nous.ahcc.desktop.log.DesktopChatLog
+import com.nous.ahcc.desktop.media.DesktopCuePlayer
 import com.nous.ahcc.desktop.media.DesktopMediaEnvelope
 import com.nous.ahcc.desktop.model.Addressee
 import com.nous.ahcc.desktop.model.ChatChannel
@@ -170,14 +173,29 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
     val telegramAuth by client.telegram.auth.collectAsState()
 
     var config by remember { mutableStateOf(DesktopUiSettings.loadConnection()) }
-    var draft by remember { mutableStateOf("") }
+    var draft by remember { mutableStateOf(TextFieldValue("")) }
     var pendingAttach by remember { mutableStateOf<File?>(null) }
-    var messages by remember { mutableStateOf(listOf<ChatMessage>()) }
+    /** Per-addressee chat threads (multi-bot). */
+    var histories by remember { mutableStateOf<Map<String, List<ChatMessage>>>(emptyMap()) }
     var showSettings by remember { mutableStateOf(false) }
     var startOnLaunch by remember { mutableStateOf(DesktopUiSettings.startOnLaunch) }
+    var awaitingAddresseeId by remember { mutableStateOf<String?>(null) }
     var addressees by remember {
         mutableStateOf(
-            DesktopUiSettings.addresseeCatalog.ifEmpty { Addressee.defaultCatalog }
+            run {
+                val loaded = DesktopUiSettings.addresseeCatalog
+                val cat = Addressee.normalizeCatalog(
+                    if (loaded.isEmpty()) Addressee.defaultCatalog else loaded,
+                )
+                val fallback = DesktopUiSettings.loadConnection().telegramBotUsername
+                    .trim().removePrefix("@")
+                if (fallback.isBlank()) cat
+                else cat.map { a ->
+                    if (a.id == Addressee.MAIN_AGENT_ID && a.telegramBotUsername.isBlank()) {
+                        a.copy(telegramBotUsername = fallback)
+                    } else a
+                }
+            },
         )
     }
     var defaultAddressee by remember {
@@ -190,6 +208,7 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
     var waitingReply by remember { mutableStateOf(false) }
     var lastReplyComplete by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val messages = histories[currentAddressee.id].orEmpty()
 
     fun persistConfig(c: ConnectionConfig) {
         DesktopUiSettings.persistConnection(c, startOnLaunch)
@@ -201,6 +220,57 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
         currentId: String = currentAddressee.id,
     ) {
         DesktopUiSettings.persistAddressees(catalog, defaultId, currentId)
+    }
+
+    fun effectiveBot(addressee: Addressee = currentAddressee): String =
+        Addressee.effectiveBotUsername(addressee, config.telegramBotUsername)
+
+    fun putMessages(addresseeId: String, list: List<ChatMessage>) {
+        histories = histories + (addresseeId to list)
+    }
+
+    fun mutateMessages(
+        addresseeId: String = currentAddressee.id,
+        transform: (List<ChatMessage>) -> List<ChatMessage>,
+    ) {
+        putMessages(addresseeId, transform(histories[addresseeId].orEmpty()))
+    }
+
+    fun syncRegisteredBots(catalog: List<Addressee> = addressees) {
+        if (config.channel != ChatChannel.Telegram) return
+        val bots = catalog.map { effectiveBot(it) }.filter { it.isNotBlank() }.distinct()
+        client.registerTelegramBots(bots)
+    }
+
+    fun selectAddressee(next: Addressee, fromInbound: Boolean = false) {
+        currentAddressee = next
+        persistAddressees(currentId = next.id)
+        val bot = effectiveBot(next)
+        if (bot.isNotBlank() && config.channel == ChatChannel.Telegram) {
+            client.switchTelegramBot(bot)
+        }
+        if (!fromInbound) {
+            // keep waitingReply tied to awaitingAddresseeId
+        }
+    }
+
+    fun findAddresseeByBot(botUsername: String): Addressee? {
+        val key = botUsername.trim().removePrefix("@")
+        if (key.isEmpty()) return null
+        return addressees.firstOrNull {
+            effectiveBot(it).equals(key, ignoreCase = true)
+        }
+    }
+
+    fun patchCurrentAddressee(transform: (Addressee) -> Addressee) {
+        val updated = transform(currentAddressee)
+        addressees = addressees.map { if (it.id == updated.id) updated else it }
+        currentAddressee = updated
+        persistAddressees(catalog = addressees, currentId = updated.id)
+        if (config.channel == ChatChannel.Telegram) {
+            client.switchTelegramBot(effectiveBot(updated))
+            syncRegisteredBots(addressees)
+        }
     }
 
     fun supabase() = AhccSupabaseClient(config.supabaseUrl, config.supabaseAnonKey)
@@ -240,7 +310,8 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
 
     fun connectWithSession(forceNew: Boolean) {
         scope.launch {
-            messages = emptyList()
+            val focusId = currentAddressee.id
+            if (forceNew) putMessages(focusId, emptyList())
             try {
                 val sb = supabase()
                 val resolved = withContext(Dispatchers.IO) {
@@ -253,60 +324,100 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                 val next = config.copy(sessionId = resolved)
                 config = next
                 persistConfig(next)
-                if (sb.isConfigured) {
+                if (sb.isConfigured && forceNew) {
                     val rows = withContext(Dispatchers.IO) { sb.fetchSessionMessages(resolved) }
-                    messages = historyFromSupabase(rows)
+                    putMessages(focusId, historyFromSupabase(rows))
+                } else if (sb.isConfigured && histories[focusId].isNullOrEmpty()) {
+                    val rows = withContext(Dispatchers.IO) { sb.fetchSessionMessages(resolved) }
+                    putMessages(focusId, historyFromSupabase(rows))
                 }
-                client.connect(next)
+                val bot = effectiveBot(currentAddressee).ifBlank { next.telegramBotUsername }
+                client.connect(next.copy(telegramBotUsername = bot))
+                syncRegisteredBots()
             } catch (e: Exception) {
-                messages = listOf(
-                    ChatMessage(
-                        UUID.randomUUID().toString(),
-                        MessageRole.System,
-                        e.message ?: "Connect / Supabase failed"
-                    )
+                putMessages(
+                    focusId,
+                    listOf(
+                        ChatMessage(
+                            UUID.randomUUID().toString(),
+                            MessageRole.System,
+                            e.message ?: "Connect / Supabase failed",
+                        ),
+                    ),
                 )
             }
         }
     }
 
     LaunchedEffect(Unit) {
+        persistAddressees(catalog = addressees)
         if (startOnLaunch && connection == ConnectionState.Disconnected) {
             connectWithSession(forceNew = false)
         }
     }
 
+    LaunchedEffect(connection, addressees) {
+        if (connection == ConnectionState.Connected) {
+            syncRegisteredBots()
+        }
+    }
+
     LaunchedEffect(Unit) {
-        client.telegram.setIdleAppend { chunk, keyboard ->
-            messages = messages.toMutableList().also { list ->
+        client.telegram.setInboundPush { botUsername, chunk, keyboard ->
+            val addr = findAddresseeByBot(botUsername) ?: currentAddressee
+            mutateMessages(addr.id) { prev ->
+                val list = prev.toMutableList()
                 val idx = list.indexOfLast { it.role == MessageRole.Assistant && it.isComplete }
                 if (idx >= 0) {
-                    val prev = list[idx]
-                    list[idx] = prev.copy(
-                        content = (prev.content + "\n\n" + chunk).trim(),
-                        inlineKeyboard = keyboard ?: prev.inlineKeyboard,
+                    val old = list[idx]
+                    val nextKb = when {
+                        keyboard != null -> keyboard
+                        DesktopCuePlayer.hasSubstantialProse(chunk) -> null
+                        else -> old.inlineKeyboard
+                    }
+                    list[idx] = old.copy(
+                        content = (old.content + "\n\n" + chunk).trim(),
+                        inlineKeyboard = nextKb,
+                    )
+                } else {
+                    list += ChatMessage(
+                        id = UUID.randomUUID().toString(),
+                        role = MessageRole.Assistant,
+                        content = chunk,
+                        isStreaming = false,
+                        isComplete = true,
+                        inlineKeyboard = keyboard,
                     )
                 }
+                list
+            }
+            if (addr.id != currentAddressee.id) {
+                selectAddressee(addr, fromInbound = true)
             }
             lastReplyComplete = true
+            when {
+                DesktopCuePlayer.looksLikeStillWorking(chunk) -> DesktopCuePlayer.playTool()
+                DesktopCuePlayer.hasSubstantialProse(chunk) -> DesktopCuePlayer.playReply()
+                chunk.isNotBlank() -> DesktopCuePlayer.playReply()
+            }
             DesktopChatLog.inbound(
                 sessionId = config.sessionId,
-                addresseeId = currentAddressee.id,
+                addresseeId = addr.id,
                 role = "assistant",
                 text = chunk,
-                note = "idle-append",
+                note = "inbound-push",
             )
         }
     }
 
     LaunchedEffect(Unit) {
         client.responses.collect { response ->
+            val targetId = awaitingAddresseeId ?: currentAddressee.id
             when (response.event) {
                 "history" -> {
-                    // Prefer Supabase history already loaded; only fill if empty.
-                    if (messages.isNotEmpty()) return@collect
+                    if (histories[targetId].orEmpty().isNotEmpty()) return@collect
                     val items = response.history.orEmpty()
-                    messages = items.mapNotNull { item ->
+                    var built = items.mapNotNull { item ->
                         val role = when (item.role.lowercase()) {
                             "user" -> MessageRole.User
                             "assistant" -> MessageRole.Assistant
@@ -316,34 +427,38 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                         ChatMessage(
                             id = UUID.randomUUID().toString(),
                             role = role,
-                            content = item.content
+                            content = item.content,
                         )
                     }
                     response.content?.takeIf { it.isNotBlank() && items.isEmpty() }?.let { note ->
-                        messages = messages + ChatMessage(
+                        built = built + ChatMessage(
                             id = UUID.randomUUID().toString(),
                             role = MessageRole.System,
-                            content = note
+                            content = note,
                         )
                     }
+                    putMessages(targetId, built)
                 }
                 "token" -> {
                     val delta = response.delta.orEmpty()
                     if (delta.isEmpty()) return@collect
-                    messages = messages.toMutableList().also { list ->
-                        val idx = list.indexOfLast { it.role == MessageRole.Assistant && it.isStreaming }
-                        if (idx >= 0) {
-                            list[idx] = list[idx].copy(content = list[idx].content + delta)
-                        } else {
-                            list += ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, delta, true)
+                    mutateMessages(targetId) { prev ->
+                        prev.toMutableList().also { list ->
+                            val idx = list.indexOfLast { it.role == MessageRole.Assistant && it.isStreaming }
+                            if (idx >= 0) {
+                                list[idx] = list[idx].copy(content = list[idx].content + delta)
+                            } else {
+                                list += ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, delta, true)
+                            }
                         }
                     }
                 }
                 "typing" -> {
                     waitingReply = true
                     lastReplyComplete = false
-                    if (messages.none { it.role == MessageRole.Assistant && it.isStreaming }) {
-                        messages = messages + ChatMessage(
+                    mutateMessages(targetId) { prev ->
+                        if (prev.any { it.role == MessageRole.Assistant && it.isStreaming }) prev
+                        else prev + ChatMessage(
                             UUID.randomUUID().toString(),
                             MessageRole.Assistant,
                             "",
@@ -355,40 +470,58 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     waitingReply = true
                     lastReplyComplete = false
                     val text = response.content.orEmpty()
-                    messages = messages.toMutableList().also { list ->
-                        val idx = list.indexOfLast { it.role == MessageRole.Assistant && it.isStreaming }
-                        if (idx >= 0) {
-                            list[idx] = list[idx].copy(content = text)
-                        } else {
-                            list += ChatMessage(
-                                UUID.randomUUID().toString(),
-                                MessageRole.Assistant,
-                                text,
-                                isStreaming = true,
-                            )
+                    if (DesktopCuePlayer.looksLikeStillWorking(text) ||
+                        DesktopCuePlayer.looksLikeToolProgress(text)
+                    ) {
+                        DesktopCuePlayer.playTool()
+                    }
+                    mutateMessages(targetId) { prev ->
+                        prev.toMutableList().also { list ->
+                            val idx = list.indexOfLast { it.role == MessageRole.Assistant && it.isStreaming }
+                            if (idx >= 0) {
+                                list[idx] = list[idx].copy(content = text)
+                            } else {
+                                list += ChatMessage(
+                                    UUID.randomUUID().toString(),
+                                    MessageRole.Assistant,
+                                    text,
+                                    isStreaming = true,
+                                )
+                            }
                         }
                     }
                 }
                 "done" -> {
                     waitingReply = false
                     lastReplyComplete = true
-                    val streamed = messages.lastOrNull { it.role == MessageRole.Assistant }?.content.orEmpty()
+                    val streamed = histories[targetId].orEmpty()
+                        .lastOrNull { it.role == MessageRole.Assistant }?.content.orEmpty()
                     val finalText = response.content?.takeIf { it.isNotBlank() } ?: streamed
                     val keyboard = response.inlineKeyboard
-                    messages = messages.map {
-                        if (it.isStreaming) {
-                            it.copy(
-                                content = finalText.ifBlank { it.content },
-                                isStreaming = false,
-                                isComplete = true,
-                                inlineKeyboard = keyboard,
-                            )
-                        } else it
+                    mutateMessages(targetId) { prev ->
+                        prev.map {
+                            if (it.isStreaming) {
+                                it.copy(
+                                    content = finalText.ifBlank { it.content },
+                                    isStreaming = false,
+                                    isComplete = true,
+                                    inlineKeyboard = keyboard,
+                                )
+                            } else it
+                        }
                     }
+                    awaitingAddresseeId = null
                     if (finalText.isNotBlank()) {
+                        when {
+                            DesktopCuePlayer.looksLikeStillWorking(finalText) ->
+                                DesktopCuePlayer.playTool()
+                            DesktopCuePlayer.hasSubstantialProse(finalText) ->
+                                DesktopCuePlayer.playReply()
+                            else -> DesktopCuePlayer.playReply()
+                        }
                         DesktopChatLog.inbound(
                             sessionId = config.sessionId,
-                            addresseeId = currentAddressee.id,
+                            addresseeId = targetId,
                             role = "assistant",
                             text = finalText,
                         )
@@ -408,37 +541,54 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                 }
                 "error" -> {
                     waitingReply = false
+                    awaitingAddresseeId = null
                     val err = response.error ?: "Error"
                     DesktopChatLog.inbound(
                         sessionId = config.sessionId,
-                        addresseeId = currentAddressee.id,
+                        addresseeId = targetId,
                         role = "error",
                         text = err,
                     )
-                    messages = messages.map { if (it.isStreaming) it.copy(isStreaming = false) else it } +
-                        ChatMessage(UUID.randomUUID().toString(), MessageRole.System, err)
+                    mutateMessages(targetId) { prev ->
+                        prev.map { if (it.isStreaming) it.copy(isStreaming = false) else it } +
+                            ChatMessage(UUID.randomUUID().toString(), MessageRole.System, err)
+                    }
                 }
             }
         }
     }
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.content) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(
+        messages.size,
+        messages.lastOrNull()?.content?.length,
+        messages.lastOrNull()?.inlineKeyboard?.rows?.size,
+        messages.lastOrNull()?.isStreaming,
+        messages.lastOrNull()?.isComplete,
+    ) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val last = messages.lastIndex
+        // animateScrollToItem alone stops at the *start* of a tall bubble — jump to end.
+        listState.scrollToItem(last, scrollOffset = Int.MAX_VALUE / 4)
+        listState.animateScrollToItem(last, scrollOffset = Int.MAX_VALUE / 4)
     }
 
     fun sendTextOnly(text: String) {
-        val wire = Addressee.wireText(text, currentAddressee)
+        val focus = currentAddressee
+        val wire = Addressee.wireText(text, focus)
         val endSession = Addressee.isSessionEndCommand(text)
         DesktopChatLog.out(
             sessionId = config.sessionId,
-            addresseeId = currentAddressee.id,
+            addresseeId = focus.id,
             text = wire,
         )
+        awaitingAddresseeId = focus.id
         waitingReply = true
         lastReplyComplete = false
-        messages = messages +
-            ChatMessage(UUID.randomUUID().toString(), MessageRole.User, text) +
-            ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", isStreaming = true)
+        mutateMessages(focus.id) { prev ->
+            prev +
+                ChatMessage(UUID.randomUUID().toString(), MessageRole.User, text) +
+                ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", isStreaming = true)
+        }
         scope.launch {
             try {
                 withContext(Dispatchers.IO) {
@@ -450,22 +600,24 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     )
                 }
                 client.sendMessage(wire)
-                if (endSession && currentAddressee.id != defaultAddressee.id) {
-                    currentAddressee = defaultAddressee
-                    persistAddressees(currentId = defaultAddressee.id)
+                if (endSession && focus.id != defaultAddressee.id) {
+                    selectAddressee(defaultAddressee)
                 }
             } catch (e: Exception) {
                 waitingReply = false
+                awaitingAddresseeId = null
                 val err = e.message ?: "send failed"
                 DesktopChatLog.system(config.sessionId, err)
-                messages = messages.map {
-                    if (it.isStreaming) {
-                        it.copy(
-                            content = err,
-                            isStreaming = false,
-                            role = MessageRole.System
-                        )
-                    } else it
+                mutateMessages(focus.id) { prev ->
+                    prev.map {
+                        if (it.isStreaming) {
+                            it.copy(
+                                content = err,
+                                isStreaming = false,
+                                role = MessageRole.System,
+                            )
+                        } else it
+                    }
                 }
             }
         }
@@ -473,23 +625,27 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
 
     fun onInlineButton(messageId: String, action: TelegramInlineAction) {
         if (waitingReply) return
-        val msg = messages.find { it.id == messageId } ?: return
+        val focus = currentAddressee
+        val msg = histories[focus.id].orEmpty().find { it.id == messageId } ?: return
         val kb = msg.inlineKeyboard
         val label = kb?.rows?.flatten()
             ?.firstOrNull { it.action == action }
             ?.text
             ?: "✓"
-        messages = messages.map {
-            if (it.id == messageId) it.copy(inlineKeyboard = null) else it
+        mutateMessages(focus.id) { prev ->
+            prev.map { if (it.id == messageId) it.copy(inlineKeyboard = null) else it }
         }
+        awaitingAddresseeId = focus.id
         waitingReply = true
         lastReplyComplete = false
-        messages = messages +
-            ChatMessage(UUID.randomUUID().toString(), MessageRole.User, label) +
-            ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", isStreaming = true)
+        mutateMessages(focus.id) { prev ->
+            prev +
+                ChatMessage(UUID.randomUUID().toString(), MessageRole.User, label) +
+                ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", isStreaming = true)
+        }
         DesktopChatLog.out(
             sessionId = config.sessionId,
-            addresseeId = currentAddressee.id,
+            addresseeId = focus.id,
             text = label,
             note = "inline",
         )
@@ -498,11 +654,14 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                 client.handleInlineAction(action, kb)
             } catch (e: Exception) {
                 waitingReply = false
+                awaitingAddresseeId = null
                 val err = e.message ?: "button failed"
                 DesktopChatLog.system(config.sessionId, err)
-                messages = messages.map {
-                    if (it.isStreaming) it.copy(content = err, isStreaming = false, role = MessageRole.System)
-                    else it
+                mutateMessages(focus.id) { prev ->
+                    prev.map {
+                        if (it.isStreaming) it.copy(content = err, isStreaming = false, role = MessageRole.System)
+                        else it
+                    }
                 }
             }
         }
@@ -545,17 +704,27 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                         text = notify,
                         note = "file=$label",
                     )
-                    messages = messages +
-                        ChatMessage(
-                            UUID.randomUUID().toString(),
-                            MessageRole.User,
-                            buildString {
-                                if (!caption.isNullOrBlank()) append(caption).append('\n')
-                                append("[file] $label")
-                            },
-                        ) +
-                        ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", true)
-                    client.sendMessage(notify)
+                    awaitingAddresseeId = currentAddressee.id
+                    mutateMessages {
+                        it +
+                            ChatMessage(
+                                UUID.randomUUID().toString(),
+                                MessageRole.User,
+                                buildString {
+                                    if (!caption.isNullOrBlank()) append(caption).append('\n')
+                                    append("[file] $label")
+                                },
+                            ) +
+                            ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", true)
+                    }
+                    // Telegram: send the real file (not notify-only). SSE: text notify is enough
+                    // if the agent reads Supabase; still attach path so Telegram bots get bytes.
+                    client.sendMedia(
+                        envelopeText = notify,
+                        historyPlaceholder = notify,
+                        localPath = file.absolutePath,
+                        asPhoto = false,
+                    )
                     return@launch
                 }
 
@@ -564,9 +733,12 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                 }
                 val envelope = DesktopMediaEnvelope.buildText(caption, attachment, config.sessionId)
                 val placeholder = DesktopMediaEnvelope.placeholder(attachment, caption)
-                messages = messages +
-                    ChatMessage(UUID.randomUUID().toString(), MessageRole.User, placeholder) +
-                    ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", true)
+                awaitingAddresseeId = currentAddressee.id
+                mutateMessages {
+                    it +
+                        ChatMessage(UUID.randomUUID().toString(), MessageRole.User, placeholder) +
+                        ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", true)
+                }
                 withContext(Dispatchers.IO) {
                     supabase().insert(
                         sessionId = config.sessionId,
@@ -582,35 +754,42 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     text = mediaHint,
                     note = "media",
                 )
-                client.sendMedia(envelope, mediaHint)
+                client.sendMedia(
+                    envelopeText = envelope,
+                    historyPlaceholder = mediaHint,
+                    localPath = file.absolutePath,
+                    asPhoto = attachment.kind == "photo",
+                )
             } catch (e: Exception) {
                 val err = e.message ?: "file send failed"
                 DesktopChatLog.system(config.sessionId, err)
-                messages = messages + ChatMessage(
-                    UUID.randomUUID().toString(),
-                    MessageRole.System,
-                    err
-                )
+                mutateMessages {
+                    it + ChatMessage(
+                        UUID.randomUUID().toString(),
+                        MessageRole.System,
+                        err,
+                    )
+                }
             }
         }
     }
 
     fun send() {
         if (connection != ConnectionState.Connected) return
-        val caption = draft.trim().ifBlank { null }
+        val caption = draft.text.trim().ifBlank { null }
         val file = pendingAttach
         if (file != null) {
             if (!file.isFile) {
                 pendingAttach = null
                 return
             }
-            draft = ""
+            draft = TextFieldValue("")
             pendingAttach = null
             sendPendingFile(file, caption)
             return
         }
         val text = caption ?: return
-        draft = ""
+        draft = TextFieldValue("")
         sendTextOnly(text)
     }
 
@@ -658,7 +837,7 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     Text(
                         when (config.channel) {
                             ChatChannel.Telegram ->
-                                "${connectionLabel(connection)} · Telegram · @${config.telegramBotUsername.ifBlank { "bot" }}"
+                                "${connectionLabel(connection)} · Telegram · @${effectiveBot().ifBlank { "bot" }}"
                             ChatChannel.HttpSse ->
                                 "${connectionLabel(connection)} · HTTP · ${config.model}"
                         },
@@ -677,8 +856,14 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     )
                 }
                 when {
-                    waitingReply -> Text(
+                    waitingReply &&
+                        (awaitingAddresseeId == null || awaitingAddresseeId == currentAddressee.id) -> Text(
                         "Hermes is typing…",
+                        color = TgTheme.Warn,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                    waitingReply && awaitingAddresseeId != currentAddressee.id -> Text(
+                        "Waiting on other agent…",
                         color = TgTheme.Warn,
                         style = MaterialTheme.typography.labelSmall,
                     )
@@ -694,16 +879,13 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     addressees = addressees,
                     selected = currentAddressee,
                     defaultAddressee = defaultAddressee,
-                    onSelect = {
-                        currentAddressee = it
-                        persistAddressees(currentId = it.id)
-                    },
+                    onSelect = { selectAddressee(it) },
                     compact = true,
                 )
             }
             TextButton(onClick = {
                 client.clearHistory()
-                messages = emptyList()
+                putMessages(currentAddressee.id, emptyList())
             }) {
                 Text("Clear", color = TgTheme.Text)
             }
@@ -719,7 +901,6 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
             IconButton(onClick = {
                 if (connection == ConnectionState.Connected || connection == ConnectionState.Connecting) {
                     client.disconnect()
-                    messages = emptyList()
                 } else {
                     connectWithSession(forceNew = false)
                 }
@@ -748,10 +929,8 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     startOnLaunch = it
                     DesktopUiSettings.startOnLaunch = it
                 },
-                onSelectAddressee = {
-                    currentAddressee = it
-                    persistAddressees(currentId = it.id)
-                },
+                onSelectAddressee = { selectAddressee(it) },
+                onPatchAddressee = { patchCurrentAddressee(it) },
                 onAddAddressee = { showAddReceiver = true },
                 onDeleteAddressee = {
                     if (currentAddressee.id == Addressee.MAIN_AGENT_ID) return@SettingsPanel
@@ -759,12 +938,12 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     addressees = next
                     val resolvedDefault = Addressee.resolve(next, defaultAddressee.id)
                     defaultAddressee = resolvedDefault
-                    currentAddressee = resolvedDefault
                     persistAddressees(
                         catalog = next,
                         defaultId = resolvedDefault.id,
                         currentId = resolvedDefault.id,
                     )
+                    selectAddressee(resolvedDefault)
                 },
                 onSetDefaultAddressee = {
                     defaultAddressee = currentAddressee
@@ -775,7 +954,8 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                 onTelegramPassword = { client.telegram.submitPassword(it) },
                 onTelegramConnect = {
                     persistConfig(config)
-                    client.connect(config)
+                    val bot = effectiveBot().ifBlank { config.telegramBotUsername }
+                    client.connect(config.copy(telegramBotUsername = bot))
                 },
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(12.dp),
             )
@@ -788,8 +968,8 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     Text(
                         when (config.channel) {
                             ChatChannel.Telegram ->
-                                "Telegram channel → Hermes bot + TO: addressees.\n" +
-                                    "Settings → Credentials to sign in.\n" +
+                                "Multi-bot: each addressee keeps its own chat.\n" +
+                                    "Incoming from any watched bot switches To automatically.\n" +
                                     "Enter — send · Paperclip — attach."
                             ChatChannel.HttpSse ->
                                 "HTTP SSE (Inference) — no server-side tools/routing.\n" +
@@ -874,23 +1054,37 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                         modifier = Modifier
                             .weight(1f)
                             .onPreviewKeyEvent { event ->
-                                if (event.type == KeyEventType.KeyDown &&
-                                    (event.key == Key.Enter || event.key == Key.NumPadEnter)
-                                ) {
-                                    if (event.isShiftPressed) false
-                                    else {
-                                        send()
-                                        true
-                                    }
-                                } else false
+                                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                if (event.key != Key.Enter && event.key != Key.NumPadEnter) {
+                                    return@onPreviewKeyEvent false
+                                }
+                                // Desktop TextField often drops Shift+Enter; insert at caret.
+                                if (event.isShiftPressed) {
+                                    val text = draft.text
+                                    val start = draft.selection.min
+                                    val end = draft.selection.max
+                                    val inserted = text.replaceRange(start, end, "\n")
+                                    val caret = start + 1
+                                    draft = TextFieldValue(
+                                        text = inserted,
+                                        selection = TextRange(caret),
+                                    )
+                                    true
+                                } else {
+                                    send()
+                                    true
+                                }
                             },
                         enabled = connection == ConnectionState.Connected,
+                        singleLine = false,
                         placeholder = {
                             Text(
                                 when {
-                                    pendingAttach != null -> "Caption for file (Enter to send)…"
-                                    currentAddressee.id == Addressee.MAIN_AGENT_ID -> "Message MainAgent…"
-                                    else -> "Message ${currentAddressee.displayName}…"
+                                    pendingAttach != null -> "Caption for file (Enter / Shift+Enter)…"
+                                    currentAddressee.id == Addressee.MAIN_AGENT_ID ->
+                                        "Message MainAgent… (Shift+Enter = newline)"
+                                    else ->
+                                        "Message ${currentAddressee.displayName}… (Shift+Enter = newline)"
                                 },
                                 color = TgTheme.Secondary,
                             )
@@ -910,7 +1104,7 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                     FilledIconButton(
                         onClick = { send() },
                         enabled = connection == ConnectionState.Connected &&
-                            (draft.isNotBlank() || pendingAttach != null),
+                            (draft.text.isNotBlank() || pendingAttach != null),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
                     }
@@ -1139,6 +1333,7 @@ private fun SettingsPanel(
     onChange: (ConnectionConfig) -> Unit,
     onStartOnLaunchChange: (Boolean) -> Unit,
     onSelectAddressee: (Addressee) -> Unit,
+    onPatchAddressee: ((Addressee) -> Addressee) -> Unit,
     onAddAddressee: () -> Unit,
     onDeleteAddressee: () -> Unit,
     onSetDefaultAddressee: () -> Unit,
@@ -1210,8 +1405,8 @@ private fun SettingsPanel(
                     CompactField(
                         value = config.telegramBotUsername,
                         onValueChange = { onChange(config.copy(telegramBotUsername = it.trim().removePrefix("@"))) },
-                        label = "Telegram bot username",
-                        width = 280.dp,
+                        label = "Fallback Telegram bot (if addressee has none)",
+                        width = 320.dp,
                     )
                     CompactField(
                         value = config.inferenceBaseUrl,
@@ -1296,9 +1491,14 @@ private fun SettingsPanel(
                     )
                     CompactField(
                         value = config.telegramChatId,
-                        onValueChange = { onChange(config.copy(telegramChatId = it)) },
-                        label = "Chat id (optional)",
-                        width = 200.dp,
+                        onValueChange = { onChange(config.copy(telegramChatId = it.filter { ch -> ch.isDigit() || ch == '-' })) },
+                        label = "Telegram user id (global, all bots)",
+                        width = 280.dp,
+                    )
+                    Text(
+                        "Portal CHANNELS allowlist / your numeric Telegram id (e.g. 6598396079). Same for every bot.",
+                        color = TgTheme.Secondary,
+                        style = MaterialTheme.typography.labelSmall,
                     )
                     Text(
                         telegramAuthLabel(telegramAuth),
@@ -1350,7 +1550,7 @@ private fun SettingsPanel(
                 else -> {
                     Text("Addressees", style = MaterialTheme.typography.titleMedium, color = TgTheme.Text)
                     Text(
-                        "MainAgent sends without TO:. Others prefix TO: <key>.",
+                        "Per-addressee bot → plain text (no TO:). Empty bot → fallback + TO: for specialists.",
                         color = TgTheme.Secondary,
                         style = MaterialTheme.typography.labelSmall,
                     )
@@ -1359,6 +1559,31 @@ private fun SettingsPanel(
                         selected = currentAddressee,
                         defaultAddressee = defaultAddressee,
                         onSelect = onSelectAddressee,
+                    )
+                    CompactField(
+                        value = currentAddressee.telegramBotUsername,
+                        onValueChange = { bot ->
+                            onPatchAddressee {
+                                it.copy(telegramBotUsername = bot.trim().removePrefix("@"))
+                            }
+                        },
+                        label = "Bot username",
+                        width = 360.dp,
+                    )
+                    CompactField(
+                        value = currentAddressee.telegramBotToken,
+                        onValueChange = { token ->
+                            onPatchAddressee { it.copy(telegramBotToken = token.trim()) }
+                        },
+                        label = "Bot token (BotFather)",
+                        width = 420.dp,
+                        secret = true,
+                    )
+                    Text(
+                        "Username = chat target in Desktop. Token = for Portal CHANNELS (stored locally). " +
+                            "User id is global under Credentials.",
+                        color = TgTheme.Secondary,
+                        style = MaterialTheme.typography.labelSmall,
                     )
                     LayoutRow(
                         modifier = Modifier.fillMaxWidth(),
@@ -1407,9 +1632,9 @@ private fun CompactField(
         modifier = Modifier
             .widthIn(max = width)
             .fillMaxWidth(0.98f)
-            .heightIn(max = 52.dp),
+            .padding(vertical = 4.dp),
         singleLine = true,
-        textStyle = MaterialTheme.typography.bodySmall,
+        textStyle = MaterialTheme.typography.bodyMedium,
         visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = TgTheme.Text,

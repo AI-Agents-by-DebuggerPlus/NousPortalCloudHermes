@@ -45,8 +45,11 @@ class DesktopTelegramUserSession {
 
     private var factory: SimpleTelegramClientFactory? = null
     private var client: SimpleTelegramClient? = null
-    private var botChatId: Long = 0L
+    /** Active bot for send / wait-reply. */
     private var botUsername: String = ""
+    private var botChatId: Long = 0L
+    private val botChatByUsername = ConcurrentHashMap<String, Long>()
+    private val usernameByChatId = ConcurrentHashMap<Long, String>()
 
     private val phoneRef = AtomicReference("")
     private val codeWaiter = AtomicReference<CompletableDeferred<String>?>(null)
@@ -60,14 +63,23 @@ class DesktopTelegramUserSession {
     private var onReply: ((String) -> Unit)? = null
     private var quietJob: Job? = null
     private var pendingInlineKeyboard: TelegramInlineKeyboard? = null
-    /** After a turn completes, keep merging late bot messages into the UI for a while. */
-    private var idleAppend: ((String, TelegramInlineKeyboard?) -> Unit)? = null
+    /**
+     * Push from any registered bot when not inside wait-reply for that chat
+     * (late appends + messages while another addressee is selected).
+     * Args: botUsername, text, keyboard.
+     */
+    private var inboundPush: ((String, String, TelegramInlineKeyboard?) -> Unit)? = null
     private var idleAppendUntilMs: Long = 0L
 
     val isReady: Boolean get() = _auth.value is DesktopTelegramAuth.Ready
 
+    fun setInboundPush(handler: ((String, String, TelegramInlineKeyboard?) -> Unit)?) {
+        inboundPush = handler
+    }
+
+    /** @deprecated use [setInboundPush] */
     fun setIdleAppend(handler: ((String, TelegramInlineKeyboard?) -> Unit)?) {
-        idleAppend = handler
+        inboundPush = handler?.let { h -> { _, text, kb -> h(text, kb) } }
     }
 
     fun takePendingInlineKeyboard(): TelegramInlineKeyboard? {
@@ -90,15 +102,38 @@ class DesktopTelegramUserSession {
             is DesktopTelegramAuth.NeedPassword,
             is DesktopTelegramAuth.Ready,
             -> {
-                this.botUsername = botUsername.removePrefix("@")
+                setBotUsername(botUsername)
                 phoneRef.set(phone.trim())
                 return
             }
             else -> Unit
         }
-        this.botUsername = botUsername.removePrefix("@")
+        setBotUsername(botUsername)
         phoneRef.set(phone.trim())
         scope.launch { startClient(apiId, apiHash, phone.trim()) }
+    }
+
+    /** Switch active bot for send/wait; keeps other bots registered. */
+    fun setBotUsername(username: String) {
+        val next = username.trim().removePrefix("@")
+        if (next.isEmpty()) return
+        botUsername = next
+        botChatId = botChatByUsername[next.lowercase()] ?: 0L
+        if (botChatId == 0L && isReady) {
+            scope.launch { runCatching { client?.let { ensureBotChat(it, next) } } }
+        }
+    }
+
+    /** Resolve and watch these bot usernames (multi-chat). */
+    fun registerBots(usernames: Collection<String>) {
+        val cleaned = usernames.map { it.trim().removePrefix("@") }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+        if (cleaned.isEmpty() || !isReady) return
+        scope.launch {
+            val c = client ?: return@launch
+            for (u in cleaned) {
+                runCatching { ensureBotChat(c, u) }
+            }
+        }
     }
 
     fun submitPhone(phone: String) {
@@ -135,6 +170,8 @@ class DesktopTelegramUserSession {
         client = null
         factory = null
         botChatId = 0L
+        botChatByUsername.clear()
+        usernameByChatId.clear()
         _auth.value = DesktopTelegramAuth.Starting
     }
 
@@ -170,10 +207,72 @@ class DesktopTelegramUserSession {
             } catch (_: Exception) {
                 val partial = snapshot()
                 if (partial.isBlank()) error("No text reply within 3 minutes")
-                TelegramReply(partial, latestKeyboard())
+                TelegramReply(partial, keyboardForCurrentReply())
             }
         } finally {
-            pendingInlineKeyboard = synchronized(replyLock) { latestKeyboard() }
+            pendingInlineKeyboard = synchronized(replyLock) { keyboardForCurrentReply() }
+            replyWaiter = null
+            onReply = null
+            quietJob?.cancel()
+            idleAppendUntilMs = System.currentTimeMillis() + IDLE_APPEND_MS
+        }
+    }
+
+    /**
+     * Send a local file as Telegram photo or document, then wait for bot reply
+     * (same quiet-window logic as [sendTextAndWaitReply]).
+     */
+    suspend fun sendLocalFileAndWaitReply(
+        path: String,
+        caption: String,
+        asPhoto: Boolean,
+        onUpdate: (String) -> Unit = {},
+    ): TelegramReply = withContext(Dispatchers.IO) {
+        val c = client ?: error("Telegram is not connected")
+        if (!isReady) error("Sign in to Telegram first (Credentials)")
+        val file = java.io.File(path)
+        if (!file.isFile) error("File not found: $path")
+        val chatId = ensureBotChat(c)
+        val waiter = CompletableDeferred<TelegramReply>()
+        synchronized(replyLock) {
+            replyParts.clear()
+            replyMarkups.clear()
+            outgoingIds.clear()
+        }
+        pendingInlineKeyboard = null
+        quietJob?.cancel()
+        onReply = onUpdate
+        replyWaiter = waiter
+        try {
+            val captionFt = TdApi.FormattedText(caption.take(1024), emptyArray())
+            val local = TdApi.InputFileLocal(file.absolutePath)
+            val content: TdApi.InputMessageContent = if (asPhoto) {
+                TdApi.InputMessagePhoto(
+                    TdApi.InputPhoto(local, null, null, intArrayOf(), 0, 0),
+                    captionFt,
+                    false,
+                    null,
+                    false,
+                )
+            } else {
+                TdApi.InputMessageDocument(
+                    TdApi.InputDocument(local, null, false),
+                    captionFt,
+                )
+            }
+            val sent = c.send(TdApi.SendMessage(chatId, null, null, null, null, content)).get()
+            if (sent is TdApi.Message) {
+                outgoingIds.add(sent.id)
+            }
+            try {
+                withTimeout(WAIT_MS) { waiter.await() }
+            } catch (_: Exception) {
+                val partial = snapshot()
+                if (partial.isBlank()) error("No text reply within 3 minutes")
+                TelegramReply(partial, keyboardForCurrentReply())
+            }
+        } finally {
+            pendingInlineKeyboard = synchronized(replyLock) { keyboardForCurrentReply() }
             replyWaiter = null
             onReply = null
             quietJob?.cancel()
@@ -212,10 +311,10 @@ class DesktopTelegramUserSession {
             } catch (_: Exception) {
                 val partial = snapshot()
                 if (partial.isBlank()) error("No reply after button press")
-                TelegramReply(partial, latestKeyboard())
+                TelegramReply(partial, keyboardForCurrentReply())
             }
         } finally {
-            pendingInlineKeyboard = synchronized(replyLock) { latestKeyboard() }
+            pendingInlineKeyboard = synchronized(replyLock) { keyboardForCurrentReply() }
             replyWaiter = null
             onReply = null
             quietJob?.cancel()
@@ -272,7 +371,11 @@ class DesktopTelegramUserSession {
             is TdApi.AuthorizationStateReady -> {
                 _auth.value = DesktopTelegramAuth.Ready
                 scope.launch {
-                    runCatching { client?.let { ensureBotChat(it) } }
+                    runCatching {
+                        client?.let { c ->
+                            if (botUsername.isNotBlank()) ensureBotChat(c, botUsername)
+                        }
+                    }
                 }
             }
             is TdApi.AuthorizationStateClosed ->
@@ -301,7 +404,7 @@ class DesktopTelegramUserSession {
         content: TdApi.MessageContent?,
         note: String,
     ) {
-        if (botChatId != 0L && chatId != botChatId) return
+        if (!isWatchedChat(chatId)) return
         val (kind, ft) = formattedOf(content) ?: return
         val plain = ft.text.orEmpty()
         if (plain.isEmpty() && (ft.entities == null || ft.entities.isEmpty())) return
@@ -315,6 +418,12 @@ class DesktopTelegramUserSession {
             note = note,
         )
     }
+
+    private fun isWatchedChat(chatId: Long): Boolean =
+        usernameByChatId.containsKey(chatId) || chatId == botChatId
+
+    private fun botUsernameForChat(chatId: Long): String =
+        usernameByChatId[chatId] ?: botUsername
 
     private fun formattedOf(content: TdApi.MessageContent?): Pair<String, TdApi.FormattedText>? {
         return when (content) {
@@ -365,14 +474,30 @@ class DesktopTelegramUserSession {
         raw: String?,
         keyboard: TelegramInlineKeyboard?,
     ) {
-        if (botChatId != 0L && chatId != botChatId) return
+        if (!isWatchedChat(chatId)) return
         if (messageId in outgoingIds) return
         val text = raw?.trim().orEmpty()
+        val bot = botUsernameForChat(chatId)
         val waiter = replyWaiter
-        if (waiter == null) {
-            if (keyboard != null) pendingInlineKeyboard = keyboard
-            if (text.isNotEmpty() && System.currentTimeMillis() < idleAppendUntilMs) {
-                idleAppend?.invoke(text, keyboard)
+        val activeChat = botChatId
+        val forActiveWait = waiter != null && (activeChat == 0L || chatId == activeChat)
+        if (!forActiveWait) {
+            if (keyboard != null && (activeChat == 0L || chatId == activeChat)) {
+                pendingInlineKeyboard = keyboard
+            }
+            if (text.isNotEmpty() || keyboard != null) {
+                val now = System.currentTimeMillis()
+                if (text.isNotEmpty() && looksLikeStillWorking(text) && chatId == activeChat) {
+                    idleAppendUntilMs = now + IDLE_APPEND_MS
+                }
+                // Push to UI for this bot (late append or background agent).
+                if (text.isNotEmpty()) {
+                    if (chatId == activeChat && now < idleAppendUntilMs) {
+                        inboundPush?.invoke(bot, text, keyboard)
+                    } else if (chatId != activeChat || waiter == null) {
+                        inboundPush?.invoke(bot, text, keyboard)
+                    }
+                }
             }
             return
         }
@@ -384,25 +509,96 @@ class DesktopTelegramUserSession {
         if (shown.isNotEmpty()) onReply?.invoke(shown)
         val hasKeyboard = keyboard != null || synchronized(replyLock) { replyMarkups.isNotEmpty() }
         quietJob?.cancel()
-        val quietMs = when {
-            hasKeyboard && shown.isNotEmpty() -> KEYBOARD_QUIET_MS
-            looksLikeToolOnly(shown) -> TOOL_QUIET_MS
-            else -> QUIET_MS
-        }
         if (shown.isBlank() && !hasKeyboard) return
+        // Keep waiting through tool cards AND Hermes status bubbles
+        // ("Agent is running", "Working — N min") until real prose arrives.
         quietJob = scope.launch {
-            delay(quietMs)
-            if (replyWaiter !== waiter || waiter.isCompleted) return@launch
-            val latest = snapshot()
-            val kb = latestKeyboard()
-            if (latest.isBlank() && kb == null) return@launch
-            // Still only tool noise — wait one more tool window before finishing.
-            if (kb == null && looksLikeToolOnly(latest)) {
-                delay(TOOL_QUIET_MS)
+            var rounds = 0
+            while (rounds < MAX_QUIET_ROUNDS) {
+                val latestBefore = snapshot()
+                val quietMs = when {
+                    hasKeyboard && latestBefore.isNotEmpty() && !looksLikeStillWorking(latestBefore) ->
+                        KEYBOARD_QUIET_MS
+                    looksLikeStillWorking(latestBefore) -> TOOL_QUIET_MS
+                    else -> QUIET_MS
+                }
+                delay(quietMs)
                 if (replyWaiter !== waiter || waiter.isCompleted) return@launch
+                val latest = snapshot()
+                if (latest.isBlank()) return@launch
+                if (looksLikeStillWorking(latest)) {
+                    rounds++
+                    continue
+                }
+                // Only keyboard attached to this turn's prose message — never
+                // fall back to an older bot menu / digit pad from replyMarkups.
+                if (hasSubstantialProse(latest)) {
+                    waiter.complete(TelegramReply(latest, keyboardForCurrentReply()))
+                    return@launch
+                }
+                // Short non-status, non-tool text (e.g. one-line intro) — accept
+                // after one quiet window; keyboards alone never finish the turn.
+                if (rounds >= 1 && latest.isNotBlank()) {
+                    waiter.complete(TelegramReply(latest, keyboardForCurrentReply()))
+                    return@launch
+                }
+                rounds++
             }
-            waiter.complete(TelegramReply(snapshot().ifBlank { latest }, latestKeyboard() ?: kb))
+            waiter.complete(TelegramReply(snapshot(), keyboardForCurrentReply()))
         }
+    }
+
+    /** Tool cards or Hermes mid-turn status — not the final user-visible answer. */
+    private fun looksLikeStillWorking(text: String): Boolean {
+        if (looksLikeToolProgress(text)) return true
+        val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return false
+        if (lines.all { isHermesStatusLine(it) }) return true
+        return lines.any { isHermesStatusLine(it) } && !hasSubstantialProse(text)
+    }
+
+    private fun isHermesStatusLine(line: String): Boolean {
+        val t = line.lowercase()
+        return t.contains("agent is running") ||
+            t.contains("working —") || t.contains("working -") ||
+            t.contains("mid-turn") ||
+            t.contains("runtime footer") ||
+            t.contains("/memory can't") ||
+            t.contains("takes effect on next message") ||
+            t.contains("iteration ") ||
+            line.startsWith("⏳") || line.startsWith("📎 Runtime")
+    }
+
+    /** True if Hermes is still streaming tool/terminal cards (may include echoed user text). */
+    private fun looksLikeToolProgress(text: String): Boolean {
+        if (text.contains("💻") || text.contains("✍️") || text.contains("📖") ||
+            text.contains("📚") || text.contains("🔧") || text.contains("↪")
+        ) {
+            return true
+        }
+        if (text.contains("Writing ", ignoreCase = true) ||
+            text.contains("Reading ", ignoreCase = true) ||
+            text.contains("/opt/hermes/", ignoreCase = true) ||
+            text.contains("/opt/data/cache/", ignoreCase = true)
+        ) {
+            return true
+        }
+        return looksLikeToolOnly(text)
+    }
+
+    private fun hasSubstantialProse(text: String): Boolean {
+        val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        val prose = lines.count { line ->
+            !isHermesStatusLine(line) &&
+                !line.startsWith("💻") && !line.startsWith("✍️") && !line.startsWith("📖") &&
+                !line.startsWith("📚") && !line.startsWith("🔧") && !line.startsWith("↪") &&
+                !line.startsWith("```") && !line.startsWith("TO:", ignoreCase = true) &&
+                !line.startsWith("_") &&
+                !line.contains("Writing ", ignoreCase = true) &&
+                !line.startsWith("terminal", ignoreCase = true) &&
+                !line.startsWith("/opt/") && line.length > 40
+        }
+        return prose >= 2
     }
 
     private fun looksLikeToolOnly(text: String): Boolean {
@@ -423,6 +619,21 @@ class DesktopTelegramUserSession {
 
     private fun latestKeyboard(): TelegramInlineKeyboard? =
         synchronized(replyLock) { replyMarkups.entries.lastOrNull()?.value }
+
+    /**
+     * Only attach an inline keyboard that belongs to a message from *this* turn
+     * with real prose — never reuse an older bot-menu keyboard (Academy / rules).
+     */
+    private fun keyboardForCurrentReply(): TelegramInlineKeyboard? =
+        synchronized(replyLock) {
+            val newestFirst = replyParts.entries.toList().asReversed()
+            newestFirst.firstOrNull { (_, text) ->
+                hasSubstantialProse(text) && !looksLikeStillWorking(text)
+            }?.let { (id, _) -> replyMarkups[id] }
+                ?: newestFirst.firstOrNull { (_, text) ->
+                    !looksLikeStillWorking(text) && text.isNotBlank()
+                }?.let { (id, _) -> replyMarkups[id] }
+        }
 
     private fun snapshot(): String = synchronized(replyLock) {
         replyParts.values.joinToString("\n\n")
@@ -450,12 +661,23 @@ class DesktopTelegramUserSession {
         return TelegramInlineKeyboard(chatId = message.chatId, messageId = message.id, rows = rows)
     }
 
-    private suspend fun ensureBotChat(c: SimpleTelegramClient): Long {
-        if (botChatId != 0L) return botChatId
-        val username = botUsername.ifBlank { error("Empty bot username") }
-        val chat = c.send(TdApi.SearchPublicChat(username)).get() as TdApi.Chat
-        botChatId = chat.id
-        return botChatId
+    private suspend fun ensureBotChat(
+        c: SimpleTelegramClient,
+        username: String = botUsername,
+    ): Long {
+        val key = username.trim().removePrefix("@")
+        if (key.isEmpty()) error("Empty bot username")
+        botChatByUsername[key.lowercase()]?.let { cached ->
+            if (key.equals(botUsername, ignoreCase = true)) botChatId = cached
+            return cached
+        }
+        val chat = c.send(TdApi.SearchPublicChat(key)).get() as TdApi.Chat
+        botChatByUsername[key.lowercase()] = chat.id
+        usernameByChatId[chat.id] = key.lowercase()
+        if (key.equals(botUsername, ignoreCase = true)) {
+            botChatId = chat.id
+        }
+        return chat.id
     }
 
     private fun textOf(content: TdApi.MessageContent?): String? = when (content) {
@@ -533,10 +755,13 @@ class DesktopTelegramUserSession {
     }
 
     companion object {
-        private const val WAIT_MS = 300_000L
+        /** Long futures/trading turns with many tool rounds. */
+        private const val WAIT_MS = 600_000L
         private const val QUIET_MS = 15_000L
-        private const val TOOL_QUIET_MS = 35_000L
+        private const val TOOL_QUIET_MS = 45_000L
         private const val KEYBOARD_QUIET_MS = 2_500L
-        private const val IDLE_APPEND_MS = 90_000L
+        /** Late final replies often arrive minutes after tool/status bubbles. */
+        private const val IDLE_APPEND_MS = 480_000L
+        private const val MAX_QUIET_ROUNDS = 40
     }
 }

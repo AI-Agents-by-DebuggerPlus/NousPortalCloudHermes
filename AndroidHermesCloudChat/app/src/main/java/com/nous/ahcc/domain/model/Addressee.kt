@@ -26,6 +26,8 @@ data class Addressee(
         const val ACCOUNTANT_ID = "accountant"
         const val SYSADMIN_ID = "sysadmin"
         const val TRADER_ID = "trader"
+        const val FUTURES_TRADER_ID = "futures_trader"
+        const val OPERATOR_ID = "operator"
 
         val ENGLISH_TUTOR = Addressee(ENGLISH_TUTOR_ID, "EnglishTutor")
         val TASK_SCHEDULER = Addressee(TASK_SCHEDULER_ID, "TaskScheduler")
@@ -34,6 +36,8 @@ data class Addressee(
         val ACCOUNTANT = Addressee(ACCOUNTANT_ID, "Accountant")
         val SYSADMIN = Addressee(SYSADMIN_ID, "SysAdmin")
         val TRADER = Addressee(TRADER_ID, "Trader")
+        val FUTURES_TRADER = Addressee(FUTURES_TRADER_ID, "FuturesTrader")
+        val OPERATOR = Addressee(OPERATOR_ID, "Operator")
 
         /** @deprecated use [MAIN_AGENT] */
         val LIAISON: Addressee get() = MAIN_AGENT
@@ -47,6 +51,8 @@ data class Addressee(
             ACCOUNTANT,
             SYSADMIN,
             TRADER,
+            FUTURES_TRADER,
+            OPERATOR,
         )
 
         /** @deprecated use [defaultCatalog] or UI state list */

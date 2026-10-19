@@ -24,7 +24,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.awt.Toolkit
@@ -74,6 +80,59 @@ private fun splitParagraphs(text: String): List<ContentBlock> =
         part.trim().takeIf { it.isNotEmpty() }?.let { ContentBlock.Paragraph(it) }
     }
 
+/** http(s) URLs and markdown `[label](url)` — open in system browser on click. */
+private val markdownLinkRegex = Regex("""\[([^\]]+)\]\((https?://[^)\s]+)\)""")
+private val bareUrlRegex = Regex("""https?://[^\s<>\[\]()\"']+""")
+
+private fun trimUrlLength(raw: String): Int {
+    var n = raw.length
+    while (n > 0 && raw[n - 1] in ".,;:!?)]}'\"»") n--
+    return n
+}
+
+private fun buildLinkAnnotatedString(text: String, linkColor: Color) =
+    buildAnnotatedString {
+        data class Span(val start: Int, val end: Int, val label: String, val url: String)
+        val spans = mutableListOf<Span>()
+        for (m in markdownLinkRegex.findAll(text)) {
+            spans += Span(m.range.first, m.range.last + 1, m.groupValues[1], m.groupValues[2])
+        }
+        for (m in bareUrlRegex.findAll(text)) {
+            if (spans.any { m.range.first < it.end && m.range.last + 1 > it.start }) continue
+            val len = trimUrlLength(m.value)
+            if (len == 0) continue
+            val url = m.value.take(len)
+            spans += Span(m.range.first, m.range.first + len, url, url)
+        }
+        spans.sortBy { it.start }
+        val linkStyles = TextLinkStyles(
+            style = SpanStyle(color = linkColor, textDecoration = TextDecoration.Underline),
+        )
+        var cursor = 0
+        for (span in spans) {
+            if (span.start < cursor) continue
+            if (span.start > cursor) append(text.substring(cursor, span.start))
+            withLink(LinkAnnotation.Url(url = span.url, styles = linkStyles)) {
+                append(span.label)
+            }
+            cursor = span.end
+        }
+        if (cursor < text.length) append(text.substring(cursor))
+    }
+
+@Composable
+private fun LinkifiedParagraph(
+    text: String,
+    color: Color,
+) {
+    val linkColor = Color(0xFF7EC8E3)
+    val annotated = remember(text, linkColor) { buildLinkAnnotatedString(text, linkColor) }
+    Text(
+        text = annotated,
+        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp, color = color),
+    )
+}
+
 @Composable
 fun MessageBody(
     text: String,
@@ -84,11 +143,7 @@ fun MessageBody(
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         blocks.forEach { block ->
             when (block) {
-                is ContentBlock.Paragraph -> Text(
-                    text = block.text,
-                    style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
-                    color = color,
-                )
+                is ContentBlock.Paragraph -> LinkifiedParagraph(text = block.text, color = color)
                 is ContentBlock.Code -> TelegramCodeBlock(title = block.title, code = block.code)
             }
         }

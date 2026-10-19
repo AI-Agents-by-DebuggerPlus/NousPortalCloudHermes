@@ -5,7 +5,8 @@
 - **В чате (Android и AHCC Desktop):** dropdown «Адресат», кнопки **Delete current** / **Add new** / **Set default**.
 - Список сохраняется в DataStore на телефоне; на Desktop — в `~/.ahcc-desktop/ui.properties`.
 - **MainAgent** (`main_agent`) — начальный дефолт, удалить нельзя; без `TO:` только у `main_agent`.
-- Встроенные specialists: **Assistant** (`assistant`), **EnglishTutor** (`english_tutor`), **TaskScheduler** (`task_scheduler`), **BioStack** (`biostack`), **Accountant** (`accountant`), **SysAdmin** (`sysadmin`; ops/диск), **Trader** (`trader`; исполнение ордеров + риск/ММ, Binance Demo). SOUL: `Docs/Agents/*.SOUL.md`. Setup Trader: [Trader-Profile-and-Binance-Demo-Setup.md](./Trader-Profile-and-Binance-Demo-Setup.md).
+- Встроенные specialists: **Assistant** (`assistant`), **EnglishTutor** (`english_tutor`), **TaskScheduler** (`task_scheduler`), **BioStack** (`biostack`), **Accountant** (`accountant`), **SysAdmin** (`sysadmin`; ops/диск), **Trader** (`trader`; исполнение + риск/ММ, Binance Demo), **FuturesTrader** (`futures_trader`; только фьючерсы USDT-M Demo), **Operator** (`operator`; исполнитель действий). SOUL: `Docs/Agents/*.SOUL.md`. Боты: [AHCC-Telegram-Bots-Map.md](./AHCC-Telegram-Bots-Map.md). Setup: [Trader-Profile-and-Binance-Demo-Setup.md](./Trader-Profile-and-Binance-Demo-Setup.md), [FuturesTrader-Profile-and-Binance-Demo-Setup.md](./FuturesTrader-Profile-and-Binance-Demo-Setup.md).
+- **Desktop:** у адресата можно задать свой Telegram bot username (Settings → Addressees). Если бот задан — сообщение уходит в его чат **без** `TO:`. Если пусто — fallback-бот из Connection + `TO:` для specialists.
 - Кнопка **Set as default** — любой адресат может стать дефолтным (выбор при старте и после «завершить/стоп/…»).
 
 ## Ключ адресации
