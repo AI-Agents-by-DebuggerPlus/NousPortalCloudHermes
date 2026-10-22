@@ -20,6 +20,8 @@ object TgTheme {
     val Ok = Color(0xFF4FAE4E)
     val Warn = Color(0xFFF2C94C)
     val TitleBar = Color(0xFF17212B)
+    /** Main window title bar — a shade lighter/bluer so the hub reads apart from agent windows. */
+    val TitleBarMain = Color(0xFF1B2A3A)
     val InputField = Color(0xFF242F3D)
 
     fun colorScheme() = darkColorScheme(

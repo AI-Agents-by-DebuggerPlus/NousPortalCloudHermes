@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box as LayoutBox
 import androidx.compose.foundation.layout.Column as LayoutColumn
 import androidx.compose.foundation.layout.Row as LayoutRow
 import androidx.compose.foundation.layout.Spacer as LayoutSpacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -61,12 +62,13 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,13 +84,13 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.ApplicationScope
 import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.WindowPosition
+import androidx.compose.ui.window.WindowState
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import com.nous.ahcc.desktop.config.DesktopUiSettings
-import com.nous.ahcc.desktop.log.DesktopChatLog
-import com.nous.ahcc.desktop.media.DesktopCuePlayer
-import com.nous.ahcc.desktop.media.DesktopMediaEnvelope
 import com.nous.ahcc.desktop.model.Addressee
 import com.nous.ahcc.desktop.model.ChatChannel
 import com.nous.ahcc.desktop.model.ChatMessage
@@ -98,19 +100,14 @@ import com.nous.ahcc.desktop.model.MessageRole
 import com.nous.ahcc.desktop.model.TelegramInlineAction
 import com.nous.ahcc.desktop.model.TelegramInlineButton
 import com.nous.ahcc.desktop.model.TelegramInlineKeyboard
-import com.nous.ahcc.desktop.net.AhccSupabaseClient
 import com.nous.ahcc.desktop.net.DesktopChatGateway
 import com.nous.ahcc.desktop.telegram.DesktopTelegramAuth
 import com.nous.ahcc.desktop.ui.AhccTitleBar
 import com.nous.ahcc.desktop.ui.MessageBody
 import com.nous.ahcc.desktop.ui.TgTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.awt.FileDialog
-import java.awt.Frame
-import java.io.File
-import java.util.UUID
+import java.awt.Toolkit
+import java.awt.event.WindowEvent
+import java.awt.event.WindowFocusListener
 
 fun main() {
     // DirectX12 often fails on older/Intel GPUs; prefer OpenGL unless overridden.
@@ -134,714 +131,76 @@ fun main() {
     }
 
     application {
-    val client = remember { DesktopChatGateway() }
-    val windowState = rememberWindowState(size = DpSize(920.dp, 720.dp))
+        val client = remember { DesktopChatGateway() }
+        val app = remember { AhccAppState(client) }
+        LaunchedEffect(Unit) { app.start() }
+        DesktopWorkspace(app)
+    }
+}
+
+/**
+ * Owns the window set: the main window (agent list + logs), one permanently
+ * bound chat window per opened addressee, and transient inbound popups.
+ */
+@Composable
+private fun ApplicationScope.DesktopWorkspace(app: AhccAppState) {
     val closeApp = {
-        client.disconnect()
+        app.shutdown()
         exitApplication()
     }
+    val mainWindowState = rememberWindowState(size = DpSize(1100.dp, 760.dp))
     Window(
         onCloseRequest = closeApp,
         title = "AHCC Desktop v${AppVersion.LABEL}",
-        state = windowState,
+        state = mainWindowState,
         undecorated = true,
     ) {
         MaterialTheme(colorScheme = TgTheme.colorScheme()) {
             LayoutColumn(modifier = Modifier.fillMaxSize().background(TgTheme.ChatBg)) {
                 AhccTitleBar(
                     title = "AHCC Desktop v${AppVersion.LABEL}",
-                    windowState = windowState,
+                    windowState = mainWindowState,
                     onClose = closeApp,
+                    background = TgTheme.TitleBarMain,
                 )
                 M3Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = TgTheme.ChatBg,
                 ) {
-                    DesktopChatApp(client)
+                    MainWindowContent(app)
                 }
             }
         }
     }
+
+    // One window per open addressee — never re-pointed at another agent.
+    app.openAddresseeIds.toList().forEach { addresseeId ->
+        val addressee = app.addresseeById(addresseeId) ?: return@forEach
+        key("chat-window-$addresseeId") {
+            ChatWindow(app, addressee)
+        }
+    }
+
+    // Transient inbound popups, stacked from the bottom-right of the screen.
+    app.notifications.toList().forEachIndexed { index, notification ->
+        key("notification-${notification.id}") {
+            NotificationWindow(app, notification, index)
+        }
     }
 }
 
+// --------------------------------------------------------------- main window
+
 @Composable
-private fun DesktopChatApp(client: DesktopChatGateway) {
-    val scope = rememberCoroutineScope()
-    val connection by client.connectionState.collectAsState()
-    val lastError by client.lastError.collectAsState()
-    val telegramAuth by client.telegram.auth.collectAsState()
+private fun MainWindowContent(app: AhccAppState) {
+    val connection by app.client.connectionState.collectAsState()
+    val lastError by app.client.lastError.collectAsState()
+    val telegramAuth by app.client.telegram.auth.collectAsState()
 
-    var config by remember { mutableStateOf(DesktopUiSettings.loadConnection()) }
-    var draft by remember { mutableStateOf(TextFieldValue("")) }
-    var pendingAttach by remember { mutableStateOf<File?>(null) }
-    /** Per-addressee chat threads (multi-bot). */
-    var histories by remember { mutableStateOf<Map<String, List<ChatMessage>>>(emptyMap()) }
-    var showSettings by remember { mutableStateOf(false) }
-    var startOnLaunch by remember { mutableStateOf(DesktopUiSettings.startOnLaunch) }
-    var awaitingAddresseeId by remember { mutableStateOf<String?>(null) }
-    var addressees by remember {
-        mutableStateOf(
-            run {
-                val loaded = DesktopUiSettings.addresseeCatalog
-                val cat = Addressee.normalizeCatalog(
-                    if (loaded.isEmpty()) Addressee.defaultCatalog else loaded,
-                )
-                val fallback = DesktopUiSettings.loadConnection().telegramBotUsername
-                    .trim().removePrefix("@")
-                if (fallback.isBlank()) cat
-                else cat.map { a ->
-                    if (a.id == Addressee.MAIN_AGENT_ID && a.telegramBotUsername.isBlank()) {
-                        a.copy(telegramBotUsername = fallback)
-                    } else a
-                }
-            },
-        )
-    }
-    var defaultAddressee by remember {
-        mutableStateOf(Addressee.resolve(addressees, DesktopUiSettings.defaultAddresseeId))
-    }
-    var currentAddressee by remember {
-        mutableStateOf(Addressee.resolve(addressees, DesktopUiSettings.currentAddresseeId))
-    }
-    var showAddReceiver by remember { mutableStateOf(false) }
-    var waitingReply by remember { mutableStateOf(false) }
-    var lastReplyComplete by remember { mutableStateOf(false) }
-    val listState = rememberLazyListState()
-    val messages = histories[currentAddressee.id].orEmpty()
-
-    fun persistConfig(c: ConnectionConfig) {
-        DesktopUiSettings.persistConnection(c, startOnLaunch)
-    }
-
-    fun persistAddressees(
-        catalog: List<Addressee> = addressees,
-        defaultId: String = defaultAddressee.id,
-        currentId: String = currentAddressee.id,
-    ) {
-        DesktopUiSettings.persistAddressees(catalog, defaultId, currentId)
-    }
-
-    fun effectiveBot(addressee: Addressee = currentAddressee): String =
-        Addressee.effectiveBotUsername(addressee, config.telegramBotUsername)
-
-    fun putMessages(addresseeId: String, list: List<ChatMessage>) {
-        histories = histories + (addresseeId to list)
-    }
-
-    fun mutateMessages(
-        addresseeId: String = currentAddressee.id,
-        transform: (List<ChatMessage>) -> List<ChatMessage>,
-    ) {
-        putMessages(addresseeId, transform(histories[addresseeId].orEmpty()))
-    }
-
-    fun syncRegisteredBots(catalog: List<Addressee> = addressees) {
-        if (config.channel != ChatChannel.Telegram) return
-        val bots = catalog.map { effectiveBot(it) }.filter { it.isNotBlank() }.distinct()
-        client.registerTelegramBots(bots)
-    }
-
-    fun selectAddressee(next: Addressee, fromInbound: Boolean = false) {
-        currentAddressee = next
-        persistAddressees(currentId = next.id)
-        val bot = effectiveBot(next)
-        if (bot.isNotBlank() && config.channel == ChatChannel.Telegram) {
-            client.switchTelegramBot(bot)
-        }
-        if (!fromInbound) {
-            // keep waitingReply tied to awaitingAddresseeId
-        }
-    }
-
-    fun findAddresseeByBot(botUsername: String): Addressee? {
-        val key = botUsername.trim().removePrefix("@")
-        if (key.isEmpty()) return null
-        return addressees.firstOrNull {
-            effectiveBot(it).equals(key, ignoreCase = true)
-        }
-    }
-
-    fun patchCurrentAddressee(transform: (Addressee) -> Addressee) {
-        val updated = transform(currentAddressee)
-        addressees = addressees.map { if (it.id == updated.id) updated else it }
-        currentAddressee = updated
-        persistAddressees(catalog = addressees, currentId = updated.id)
-        if (config.channel == ChatChannel.Telegram) {
-            client.switchTelegramBot(effectiveBot(updated))
-            syncRegisteredBots(addressees)
-        }
-    }
-
-    fun supabase() = AhccSupabaseClient(config.supabaseUrl, config.supabaseAnonKey)
-
-    fun historyFromSupabase(rows: List<com.nous.ahcc.desktop.net.AhccMessageRow>): List<ChatMessage> =
-        rows.mapNotNull { row ->
-            when {
-                row.content.equals(AhccSupabaseClient.NEW_SESSION_CONTENT, ignoreCase = true) ->
-                    ChatMessage(
-                        id = row.id ?: UUID.randomUUID().toString(),
-                        role = MessageRole.System,
-                        content = "Session ${row.sessionId}"
-                    )
-                AhccSupabaseClient.parseFileMarker(row.content) != null -> {
-                    val ref = AhccSupabaseClient.parseFileMarker(row.content)!!
-                    ChatMessage(
-                        id = row.id ?: UUID.randomUUID().toString(),
-                        role = if (row.senderName.equals(AhccSupabaseClient.SENDER_HERMES, ignoreCase = true))
-                            MessageRole.Assistant else MessageRole.User,
-                        content = "[file] ${ref.second}"
-                    )
-                }
-                row.senderName.equals(AhccSupabaseClient.SENDER_HERMES, ignoreCase = true) ->
-                    ChatMessage(
-                        id = row.id ?: UUID.randomUUID().toString(),
-                        role = MessageRole.Assistant,
-                        content = row.content
-                    )
-                else ->
-                    ChatMessage(
-                        id = row.id ?: UUID.randomUUID().toString(),
-                        role = MessageRole.User,
-                        content = row.content
-                    )
-            }
-        }
-
-    fun connectWithSession(forceNew: Boolean) {
-        scope.launch {
-            val focusId = currentAddressee.id
-            if (forceNew) putMessages(focusId, emptyList())
-            try {
-                val sb = supabase()
-                val resolved = withContext(Dispatchers.IO) {
-                    sb.resolveOrCreateSession(
-                        forceNew = forceNew,
-                        preferredId = config.sessionId,
-                        senderName = AhccSupabaseClient.SENDER_DESKTOP,
-                    )
-                }
-                val next = config.copy(sessionId = resolved)
-                config = next
-                persistConfig(next)
-                if (sb.isConfigured && forceNew) {
-                    val rows = withContext(Dispatchers.IO) { sb.fetchSessionMessages(resolved) }
-                    putMessages(focusId, historyFromSupabase(rows))
-                } else if (sb.isConfigured && histories[focusId].isNullOrEmpty()) {
-                    val rows = withContext(Dispatchers.IO) { sb.fetchSessionMessages(resolved) }
-                    putMessages(focusId, historyFromSupabase(rows))
-                }
-                val bot = effectiveBot(currentAddressee).ifBlank { next.telegramBotUsername }
-                client.connect(next.copy(telegramBotUsername = bot))
-                syncRegisteredBots()
-            } catch (e: Exception) {
-                putMessages(
-                    focusId,
-                    listOf(
-                        ChatMessage(
-                            UUID.randomUUID().toString(),
-                            MessageRole.System,
-                            e.message ?: "Connect / Supabase failed",
-                        ),
-                    ),
-                )
-            }
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        persistAddressees(catalog = addressees)
-        if (startOnLaunch && connection == ConnectionState.Disconnected) {
-            connectWithSession(forceNew = false)
-        }
-    }
-
-    LaunchedEffect(connection, addressees) {
-        if (connection == ConnectionState.Connected) {
-            syncRegisteredBots()
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        client.telegram.setInboundPush { botUsername, chunk, keyboard, attachment ->
-            val addr = findAddresseeByBot(botUsername) ?: currentAddressee
-            mutateMessages(addr.id) { prev ->
-                val list = prev.toMutableList()
-                val idx = list.indexOfLast { it.role == MessageRole.Assistant && it.isComplete }
-                if (idx >= 0) {
-                    val old = list[idx]
-                    val nextKb = when {
-                        keyboard != null -> keyboard
-                        DesktopCuePlayer.hasSubstantialProse(chunk) -> null
-                        else -> old.inlineKeyboard
-                    }
-                    list[idx] = old.copy(
-                        content = (old.content + "\n\n" + chunk).trim(),
-                        inlineKeyboard = nextKb,
-                        localAttachmentPath = attachment?.localPath ?: old.localAttachmentPath,
-                        attachmentName = attachment?.displayName ?: old.attachmentName,
-                    )
-                } else {
-                    list += ChatMessage(
-                        id = UUID.randomUUID().toString(),
-                        role = MessageRole.Assistant,
-                        content = chunk,
-                        isStreaming = false,
-                        isComplete = true,
-                        inlineKeyboard = keyboard,
-                        localAttachmentPath = attachment?.localPath,
-                        attachmentName = attachment?.displayName,
-                    )
-                }
-                list
-            }
-            if (addr.id != currentAddressee.id) {
-                selectAddressee(addr, fromInbound = true)
-            }
-            lastReplyComplete = true
-            when {
-                DesktopCuePlayer.looksLikeStillWorking(chunk) -> DesktopCuePlayer.playTool()
-                DesktopCuePlayer.hasSubstantialProse(chunk) -> DesktopCuePlayer.playReply()
-                chunk.isNotBlank() -> DesktopCuePlayer.playReply()
-            }
-            DesktopChatLog.inbound(
-                sessionId = config.sessionId,
-                addresseeId = addr.id,
-                role = "assistant",
-                text = chunk,
-                note = "inbound-push",
-            )
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        client.responses.collect { response ->
-            val targetId = awaitingAddresseeId ?: currentAddressee.id
-            when (response.event) {
-                "history" -> {
-                    if (histories[targetId].orEmpty().isNotEmpty()) return@collect
-                    val items = response.history.orEmpty()
-                    var built = items.mapNotNull { item ->
-                        val role = when (item.role.lowercase()) {
-                            "user" -> MessageRole.User
-                            "assistant" -> MessageRole.Assistant
-                            "system" -> MessageRole.System
-                            else -> return@mapNotNull null
-                        }
-                        ChatMessage(
-                            id = UUID.randomUUID().toString(),
-                            role = role,
-                            content = item.content,
-                        )
-                    }
-                    response.content?.takeIf { it.isNotBlank() && items.isEmpty() }?.let { note ->
-                        built = built + ChatMessage(
-                            id = UUID.randomUUID().toString(),
-                            role = MessageRole.System,
-                            content = note,
-                        )
-                    }
-                    putMessages(targetId, built)
-                }
-                "token" -> {
-                    val delta = response.delta.orEmpty()
-                    if (delta.isEmpty()) return@collect
-                    mutateMessages(targetId) { prev ->
-                        prev.toMutableList().also { list ->
-                            val idx = list.indexOfLast { it.role == MessageRole.Assistant && it.isStreaming }
-                            if (idx >= 0) {
-                                list[idx] = list[idx].copy(content = list[idx].content + delta)
-                            } else {
-                                list += ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, delta, true)
-                            }
-                        }
-                    }
-                }
-                "typing" -> {
-                    waitingReply = true
-                    lastReplyComplete = false
-                    mutateMessages(targetId) { prev ->
-                        if (prev.any { it.role == MessageRole.Assistant && it.isStreaming }) prev
-                        else prev + ChatMessage(
-                            UUID.randomUUID().toString(),
-                            MessageRole.Assistant,
-                            "",
-                            isStreaming = true,
-                        )
-                    }
-                }
-                "partial" -> {
-                    waitingReply = true
-                    lastReplyComplete = false
-                    val text = response.content.orEmpty()
-                    if (DesktopCuePlayer.looksLikeStillWorking(text) ||
-                        DesktopCuePlayer.looksLikeToolProgress(text)
-                    ) {
-                        DesktopCuePlayer.playTool()
-                    }
-                    mutateMessages(targetId) { prev ->
-                        prev.toMutableList().also { list ->
-                            val idx = list.indexOfLast { it.role == MessageRole.Assistant && it.isStreaming }
-                            if (idx >= 0) {
-                                list[idx] = list[idx].copy(content = text)
-                            } else {
-                                list += ChatMessage(
-                                    UUID.randomUUID().toString(),
-                                    MessageRole.Assistant,
-                                    text,
-                                    isStreaming = true,
-                                )
-                            }
-                        }
-                    }
-                }
-                "done" -> {
-                    waitingReply = false
-                    lastReplyComplete = true
-                    val streamed = histories[targetId].orEmpty()
-                        .lastOrNull { it.role == MessageRole.Assistant }?.content.orEmpty()
-                    val finalText = response.content?.takeIf { it.isNotBlank() } ?: streamed
-                    val keyboard = response.inlineKeyboard
-                    val attachment = response.attachment
-                    mutateMessages(targetId) { prev ->
-                        prev.map {
-                            if (it.isStreaming) {
-                                it.copy(
-                                    content = finalText.ifBlank { it.content },
-                                    isStreaming = false,
-                                    isComplete = true,
-                                    inlineKeyboard = keyboard,
-                                    localAttachmentPath = attachment?.localPath ?: it.localAttachmentPath,
-                                    attachmentName = attachment?.displayName ?: it.attachmentName,
-                                )
-                            } else it
-                        }
-                    }
-                    awaitingAddresseeId = null
-                    if (finalText.isNotBlank()) {
-                        when {
-                            DesktopCuePlayer.looksLikeStillWorking(finalText) ->
-                                DesktopCuePlayer.playTool()
-                            DesktopCuePlayer.hasSubstantialProse(finalText) ->
-                                DesktopCuePlayer.playReply()
-                            else -> DesktopCuePlayer.playReply()
-                        }
-                        DesktopChatLog.inbound(
-                            sessionId = config.sessionId,
-                            addresseeId = targetId,
-                            role = "assistant",
-                            text = finalText,
-                        )
-                        scope.launch {
-                            runCatching {
-                                withContext(Dispatchers.IO) {
-                                    supabase().insert(
-                                        sessionId = config.sessionId,
-                                        senderName = AhccSupabaseClient.SENDER_HERMES,
-                                        content = finalText,
-                                        recipientName = AhccSupabaseClient.SENDER_DESKTOP,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-                "error" -> {
-                    waitingReply = false
-                    awaitingAddresseeId = null
-                    val err = response.error ?: "Error"
-                    DesktopChatLog.inbound(
-                        sessionId = config.sessionId,
-                        addresseeId = targetId,
-                        role = "error",
-                        text = err,
-                    )
-                    mutateMessages(targetId) { prev ->
-                        prev.map { if (it.isStreaming) it.copy(isStreaming = false) else it } +
-                            ChatMessage(UUID.randomUUID().toString(), MessageRole.System, err)
-                    }
-                }
-            }
-        }
-    }
-
-    LaunchedEffect(
-        messages.size,
-        messages.lastOrNull()?.content?.length,
-        messages.lastOrNull()?.inlineKeyboard?.rows?.size,
-        messages.lastOrNull()?.isStreaming,
-        messages.lastOrNull()?.isComplete,
-    ) {
-        if (messages.isEmpty()) return@LaunchedEffect
-        val last = messages.lastIndex
-        // animateScrollToItem alone stops at the *start* of a tall bubble — jump to end.
-        listState.scrollToItem(last, scrollOffset = Int.MAX_VALUE / 4)
-        listState.animateScrollToItem(last, scrollOffset = Int.MAX_VALUE / 4)
-    }
-
-    fun sendTextOnly(text: String) {
-        val focus = currentAddressee
-        val wire = Addressee.wireText(text, focus)
-        val endSession = Addressee.isSessionEndCommand(text)
-        DesktopChatLog.out(
-            sessionId = config.sessionId,
-            addresseeId = focus.id,
-            text = wire,
-        )
-        awaitingAddresseeId = focus.id
-        waitingReply = true
-        lastReplyComplete = false
-        mutateMessages(focus.id) { prev ->
-            prev +
-                ChatMessage(UUID.randomUUID().toString(), MessageRole.User, text) +
-                ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", isStreaming = true)
-        }
-        scope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    supabase().insert(
-                        sessionId = config.sessionId,
-                        senderName = AhccSupabaseClient.SENDER_DESKTOP,
-                        content = wire,
-                        recipientName = AhccSupabaseClient.SENDER_HERMES,
-                    )
-                }
-                client.sendMessage(wire)
-                if (endSession && focus.id != defaultAddressee.id) {
-                    selectAddressee(defaultAddressee)
-                }
-            } catch (e: Exception) {
-                waitingReply = false
-                awaitingAddresseeId = null
-                val err = e.message ?: "send failed"
-                DesktopChatLog.system(config.sessionId, err)
-                mutateMessages(focus.id) { prev ->
-                    prev.map {
-                        if (it.isStreaming) {
-                            it.copy(
-                                content = err,
-                                isStreaming = false,
-                                role = MessageRole.System,
-                            )
-                        } else it
-                    }
-                }
-            }
-        }
-    }
-
-    fun onInlineButton(messageId: String, action: TelegramInlineAction) {
-        if (waitingReply) return
-        val focus = currentAddressee
-        val msg = histories[focus.id].orEmpty().find { it.id == messageId } ?: return
-        val kb = msg.inlineKeyboard
-        val label = kb?.rows?.flatten()
-            ?.firstOrNull { it.action == action }
-            ?.text
-            ?: "✓"
-        mutateMessages(focus.id) { prev ->
-            prev.map { if (it.id == messageId) it.copy(inlineKeyboard = null) else it }
-        }
-        awaitingAddresseeId = focus.id
-        waitingReply = true
-        lastReplyComplete = false
-        mutateMessages(focus.id) { prev ->
-            prev +
-                ChatMessage(UUID.randomUUID().toString(), MessageRole.User, label) +
-                ChatMessage(UUID.randomUUID().toString(), MessageRole.Assistant, "", isStreaming = true)
-        }
-        DesktopChatLog.out(
-            sessionId = config.sessionId,
-            addresseeId = focus.id,
-            text = label,
-            note = "inline",
-        )
-        scope.launch {
-            try {
-                client.handleInlineAction(action, kb)
-            } catch (e: Exception) {
-                waitingReply = false
-                awaitingAddresseeId = null
-                val err = e.message ?: "button failed"
-                DesktopChatLog.system(config.sessionId, err)
-                mutateMessages(focus.id) { prev ->
-                    prev.map {
-                        if (it.isStreaming) it.copy(content = err, isStreaming = false, role = MessageRole.System)
-                        else it
-                    }
-                }
-            }
-        }
-    }
-
-    fun sendPendingFile(file: File, caption: String?) {
-        scope.launch {
-            try {
-                val fileName = file.name
-                val lower = fileName.lowercase()
-                val isTextShare = lower.endsWith(".md") || lower.endsWith(".markdown") ||
-                    lower.endsWith(".txt") || lower.endsWith(".json") || lower.endsWith(".csv")
-                if (isTextShare && supabase().isConfigured) {
-                    val text = withContext(Dispatchers.IO) { file.readText(Charsets.UTF_8) }
-                    val mime = when {
-                        lower.endsWith(".md") || lower.endsWith(".markdown") -> "text/markdown"
-                        lower.endsWith(".json") -> "application/json"
-                        lower.endsWith(".csv") -> "text/csv"
-                        else -> "text/plain"
-                    }
-                    val marker = withContext(Dispatchers.IO) {
-                        supabase().uploadTextFile(
-                            sessionId = config.sessionId,
-                            senderName = AhccSupabaseClient.SENDER_DESKTOP,
-                            fileName = fileName,
-                            text = text,
-                            mime = mime,
-                            recipientName = AhccSupabaseClient.SENDER_ANDROID,
-                        )
-                    }
-                    val label = AhccSupabaseClient.parseFileMarker(marker)?.second ?: fileName
-                    val notifyBody = buildString {
-                        if (!caption.isNullOrBlank()) append(caption).append('\n')
-                        append("Shared file via Supabase: $label")
-                    }
-                    val notify = Addressee.wireText(notifyBody, currentAddressee)
-                    DesktopChatLog.out(
-                        sessionId = config.sessionId,
-                        addresseeId = currentAddressee.id,
-                        text = notify,
-                        note = "file=$label",
-                    )
-                    awaitingAddresseeId = currentAddressee.id
-                    mutateMessages {
-                        it +
-                            ChatMessage(
-                                id = UUID.randomUUID().toString(),
-                                role = MessageRole.User,
-                                content = buildString {
-                                    if (!caption.isNullOrBlank()) append(caption).append('\n')
-                                    append("[file] $label")
-                                },
-                                localAttachmentPath = file.absolutePath,
-                                attachmentName = fileName,
-                            ) +
-                            ChatMessage(
-                                id = UUID.randomUUID().toString(),
-                                role = MessageRole.Assistant,
-                                content = "",
-                                isStreaming = true,
-                            )
-                    }
-                    // Telegram: send the real file (not notify-only). SSE: text notify is enough
-                    // if the agent reads Supabase; still attach path so Telegram bots get bytes.
-                    client.sendMedia(
-                        envelopeText = notify,
-                        historyPlaceholder = notify,
-                        localPath = file.absolutePath,
-                        asPhoto = false,
-                    )
-                    return@launch
-                }
-
-                val attachment = withContext(Dispatchers.IO) {
-                    DesktopMediaEnvelope.fromFile(file)
-                }
-                val envelope = DesktopMediaEnvelope.buildText(caption, attachment, config.sessionId)
-                val placeholder = DesktopMediaEnvelope.placeholder(attachment, caption)
-                awaitingAddresseeId = currentAddressee.id
-                mutateMessages {
-                    it +
-                        ChatMessage(
-                            id = UUID.randomUUID().toString(),
-                            role = MessageRole.User,
-                            content = placeholder,
-                            localAttachmentPath = file.absolutePath,
-                            attachmentName = file.name,
-                        ) +
-                        ChatMessage(
-                            id = UUID.randomUUID().toString(),
-                            role = MessageRole.Assistant,
-                            content = "",
-                            isStreaming = true,
-                        )
-                }
-                withContext(Dispatchers.IO) {
-                    supabase().insert(
-                        sessionId = config.sessionId,
-                        senderName = AhccSupabaseClient.SENDER_DESKTOP,
-                        content = placeholder,
-                        recipientName = AhccSupabaseClient.SENDER_HERMES,
-                    )
-                }
-                val mediaHint = Addressee.wireText(placeholder, currentAddressee)
-                DesktopChatLog.out(
-                    sessionId = config.sessionId,
-                    addresseeId = currentAddressee.id,
-                    text = mediaHint,
-                    note = "media",
-                )
-                client.sendMedia(
-                    envelopeText = envelope,
-                    historyPlaceholder = mediaHint,
-                    localPath = file.absolutePath,
-                    asPhoto = attachment.kind == "photo",
-                )
-            } catch (e: Exception) {
-                val err = e.message ?: "file send failed"
-                DesktopChatLog.system(config.sessionId, err)
-                mutateMessages {
-                    it + ChatMessage(
-                        UUID.randomUUID().toString(),
-                        MessageRole.System,
-                        err,
-                    )
-                }
-            }
-        }
-    }
-
-    fun send() {
-        if (connection != ConnectionState.Connected) return
-        val caption = draft.text.trim().ifBlank { null }
-        val file = pendingAttach
-        if (file != null) {
-            if (!file.isFile) {
-                pendingAttach = null
-                return
-            }
-            draft = TextFieldValue("")
-            pendingAttach = null
-            sendPendingFile(file, caption)
-            return
-        }
-        val text = caption ?: return
-        draft = TextFieldValue("")
-        sendTextOnly(text)
-    }
-
-    fun pickAttachment() {
-        if (connection != ConnectionState.Connected) return
-        val dialog = FileDialog(Frame(), "Attach file", FileDialog.LOAD)
-        dialog.isMultipleMode = false
-        dialog.isVisible = true
-        val dir = dialog.directory ?: return
-        val fileName = dialog.file ?: return
-        val file = File(dir, fileName)
-        if (!file.isFile) return
-        pendingAttach = file
-    }
-
-    if (showAddReceiver) {
+    if (app.showAddReceiver) {
         AddReceiverDialog(
-            onDismiss = { showAddReceiver = false },
-            onConfirm = { name, key ->
-                val id = key?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
-                    ?: Addressee.newId(name, addressees)
-                if (addressees.any { it.id.equals(id, ignoreCase = true) }) return@AddReceiverDialog
-                val next = Addressee(id, name.trim())
-                addressees = addressees + next
-                currentAddressee = next
-                persistAddressees(catalog = addressees, currentId = next.id)
-            },
+            onDismiss = { app.showAddReceiver = false },
+            onConfirm = { name, key -> app.addAddressee(name, key) },
         )
     }
 
@@ -860,12 +219,17 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                 ) {
                     ConnectionIndicator(connection)
                     Text(
-                        when (config.channel) {
+                        when (app.config.channel) {
                             ChatChannel.Telegram ->
-                                "${connectionLabel(connection)} · Telegram · @${effectiveBot().ifBlank { "bot" }}"
+                                "${connectionLabel(connection)} · Telegram"
                             ChatChannel.HttpSse ->
-                                "${connectionLabel(connection)} · HTTP · ${config.model}"
+                                "${connectionLabel(connection)} · HTTP · ${app.config.model}"
                         },
+                        color = TgTheme.Secondary,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                    Text(
+                        "Agents ${app.addressees.size} · open ${app.openAddresseeIds.size}",
                         color = TgTheme.Secondary,
                         style = MaterialTheme.typography.labelSmall,
                     )
@@ -873,63 +237,26 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
                 lastError?.let {
                     Text(it, color = TgTheme.Danger, style = MaterialTheme.typography.labelSmall)
                 }
-                if (config.channel == ChatChannel.Telegram && telegramAuth !is DesktopTelegramAuth.Ready) {
+                if (app.config.channel == ChatChannel.Telegram &&
+                    telegramAuth !is DesktopTelegramAuth.Ready
+                ) {
                     Text(
                         telegramAuthLabel(telegramAuth),
                         color = TgTheme.Warn,
                         style = MaterialTheme.typography.labelSmall,
                     )
                 }
-                when {
-                    waitingReply &&
-                        (awaitingAddresseeId == null || awaitingAddresseeId == currentAddressee.id) -> Text(
-                        "Hermes is typing…",
-                        color = TgTheme.Warn,
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                    waitingReply && awaitingAddresseeId != currentAddressee.id -> Text(
-                        "Waiting on other agent…",
-                        color = TgTheme.Warn,
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                    lastReplyComplete -> Text(
-                        "Reply received ✓",
-                        color = TgTheme.Ok,
-                        style = MaterialTheme.typography.labelSmall,
-                    )
-                }
             }
-            if (!showSettings) {
-                AddresseeDropdown(
-                    addressees = addressees,
-                    selected = currentAddressee,
-                    defaultAddressee = defaultAddressee,
-                    onSelect = { selectAddressee(it) },
-                    compact = true,
-                )
+            TextButton(onClick = { app.clearLog() }) {
+                Text("Clear log", color = TgTheme.Text)
             }
-            TextButton(onClick = {
-                client.clearHistory()
-                putMessages(currentAddressee.id, emptyList())
-            }) {
-                Text("Clear", color = TgTheme.Text)
-            }
-            TextButton(onClick = { connectWithSession(forceNew = true) }) {
-                Text("New session", color = TgTheme.Text)
-            }
-            TextButton(onClick = { showSettings = !showSettings }) {
+            TextButton(onClick = { app.showSettings = !app.showSettings }) {
                 Text(
-                    if (showSettings) "Chat" else "Settings",
+                    if (app.showSettings) "Logs" else "Settings",
                     color = TgTheme.Text,
                 )
             }
-            IconButton(onClick = {
-                if (connection == ConnectionState.Connected || connection == ConnectionState.Connecting) {
-                    client.disconnect()
-                } else {
-                    connectWithSession(forceNew = false)
-                }
-            }) {
+            IconButton(onClick = { app.toggleConnection() }) {
                 Icon(
                     if (connection == ConnectionState.Connected) Icons.Default.LinkOff else Icons.Default.Link,
                     contentDescription = "Toggle connection",
@@ -938,202 +265,562 @@ private fun DesktopChatApp(client: DesktopChatGateway) {
             }
         }
 
-        if (showSettings) {
-            SettingsPanel(
-                config = config,
-                startOnLaunch = startOnLaunch,
-                telegramAuth = telegramAuth,
-                addressees = addressees,
-                currentAddressee = currentAddressee,
-                defaultAddressee = defaultAddressee,
-                onChange = {
-                    config = it
-                    persistConfig(it)
-                },
-                onStartOnLaunchChange = {
-                    startOnLaunch = it
-                    DesktopUiSettings.startOnLaunch = it
-                },
-                onSelectAddressee = { selectAddressee(it) },
-                onPatchAddressee = { patchCurrentAddressee(it) },
-                onAddAddressee = { showAddReceiver = true },
-                onDeleteAddressee = {
-                    if (currentAddressee.id == Addressee.MAIN_AGENT_ID) return@SettingsPanel
-                    val next = addressees.filter { it.id != currentAddressee.id }
-                    addressees = next
-                    val resolvedDefault = Addressee.resolve(next, defaultAddressee.id)
-                    defaultAddressee = resolvedDefault
-                    persistAddressees(
-                        catalog = next,
-                        defaultId = resolvedDefault.id,
-                        currentId = resolvedDefault.id,
-                    )
-                    selectAddressee(resolvedDefault)
-                },
-                onSetDefaultAddressee = {
-                    defaultAddressee = currentAddressee
-                    persistAddressees(defaultId = currentAddressee.id)
-                },
-                onTelegramPhone = { client.telegram.submitPhone(it) },
-                onTelegramCode = { client.telegram.submitCode(it) },
-                onTelegramPassword = { client.telegram.submitPassword(it) },
-                onTelegramConnect = {
-                    persistConfig(config)
-                    val bot = effectiveBot().ifBlank { config.telegramBotUsername }
-                    client.connect(config.copy(telegramBotUsername = bot))
-                },
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(12.dp),
+        LayoutRow(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            AgentSidebar(
+                app = app,
+                modifier = Modifier.width(240.dp).fillMaxHeight(),
             )
-        } else {
-            if (messages.isEmpty()) {
-                LayoutBox(
-                    modifier = Modifier.weight(1f).fillMaxWidth().padding(24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        when (config.channel) {
-                            ChatChannel.Telegram ->
-                                "Multi-bot: each addressee keeps its own chat.\n" +
-                                    "Incoming from any watched bot switches To automatically.\n" +
-                                    "Enter — send · Paperclip — attach."
-                            ChatChannel.HttpSse ->
-                                "HTTP SSE (Inference) — no server-side tools/routing.\n" +
-                                    "Enter — send · Paperclip — attach."
-                        },
-                        color = TgTheme.Secondary,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
+            if (app.showSettings) {
+                SettingsPanel(
+                    config = app.config,
+                    startOnLaunch = app.startOnLaunch,
+                    telegramAuth = telegramAuth,
+                    addressees = app.addressees,
+                    currentAddressee = app.settingsAddressee,
+                    defaultAddressee = app.defaultAddressee,
+                    onChange = { app.updateConfig(it) },
+                    onStartOnLaunchChange = {
+                        app.startOnLaunch = it
+                        DesktopUiSettings.startOnLaunch = it
+                    },
+                    onSelectAddressee = { app.settingsAddresseeId = it.id },
+                    onPatchAddressee = { app.patchAddressee(it) },
+                    onAddAddressee = { app.showAddReceiver = true },
+                    onDeleteAddressee = { app.deleteAddressee(app.settingsAddresseeId) },
+                    onSetDefaultAddressee = { app.setDefaultAddressee(app.settingsAddresseeId) },
+                    onTelegramPhone = { app.client.telegram.submitPhone(it) },
+                    onTelegramCode = { app.client.telegram.submitCode(it) },
+                    onTelegramPassword = { app.client.telegram.submitPassword(it) },
+                    onTelegramConnect = {
+                        app.persistConfig(app.config)
+                        val bot = app.effectiveBot(app.defaultAddressee)
+                            .ifBlank { app.config.telegramBotUsername }
+                        app.client.connect(app.config.copy(telegramBotUsername = bot))
+                    },
+                    modifier = Modifier.weight(1f).fillMaxHeight().padding(12.dp),
+                )
             } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(messages, key = { it.id }) { msg ->
-                        MessageBubble(
-                            message = msg,
-                            onInlineButton = { action -> onInlineButton(msg.id, action) },
+                LogPane(
+                    app = app,
+                    modifier = Modifier.weight(1f).fillMaxHeight(),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Per-agent background tint, chosen per agent and applied to the agent's row in
+ * the main-window sidebar and to the title bar of its chat window.
+ * A row is drawn at full strength while the agent's window is open and faded
+ * (see [agentRowBackground]) while it is closed.
+ */
+private fun agentTint(addresseeId: String): Color? = when (addresseeId) {
+    Addressee.MAIN_AGENT_ID -> Color(0xFF123A5E)      // MainAgent — blue
+    "assistant" -> Color(0xFF14532D)                  // Assistant — green
+    "english_tutor" -> Color(0xFF115E59)              // EnglishTutor — teal
+    "task_scheduler" -> Color(0xFF1E2A6B)             // TaskScheduler — indigo
+    "biostack" -> Color(0xFF365314)                   // BioStack — olive
+    "accountant" -> Color(0xFF713F12)                 // Accountant — amber-brown
+    "sysadmin" -> Color(0xFF4C1D95)                   // SysAdmin — violet
+    "trader" -> Color(0xFF065F46)                     // Trader — emerald
+    "futures_trader" -> Color(0xFF7C2D12)             // FuturesTrader — rust
+    Addressee.OPERATOR_ID -> Color(0xFF0B3B47)        // Operator — cyan
+    else -> null
+}
+
+/** Sidebar background for one agent row: full tint when open, 20% transparent when closed. */
+private fun agentRowBackground(addresseeId: String, isOpen: Boolean): Color {
+    val tint = agentTint(addresseeId)
+    return when {
+        tint == null -> if (isOpen) TgTheme.InputField else Color.Transparent
+        isOpen -> tint
+        else -> tint.copy(alpha = 0.8f)
+    }
+}
+
+@Composable
+private fun AgentSidebar(app: AhccAppState, modifier: Modifier = Modifier) {
+    LayoutColumn(
+        modifier = modifier
+            .background(TgTheme.Panel)
+            .verticalScroll(rememberScrollState())
+            .padding(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(
+            "Agents",
+            style = MaterialTheme.typography.titleSmall,
+            color = TgTheme.Text,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
+        )
+        app.addressees.forEach { addressee ->
+            key("sidebar-${addressee.id}") {
+                AgentSidebarRow(app, addressee)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AgentSidebarRow(app: AhccAppState, addressee: Addressee) {
+    val unreadCount = app.unread[addressee.id] ?: 0
+    val isOpen = app.openAddresseeIds.contains(addressee.id)
+    LayoutRow(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(agentRowBackground(addressee.id, isOpen))
+            .clickable { app.openWindow(addressee.id) }
+            .padding(horizontal = 8.dp, vertical = 7.dp),
+    ) {
+        LayoutColumn(modifier = Modifier.weight(1f)) {
+            Text(
+                addressee.displayName,
+                color = TgTheme.Text,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (unreadCount > 0) {
+            LayoutBox(
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .background(TgTheme.Accent)
+                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    if (unreadCount > 99) "99+" else unreadCount.toString(),
+                    color = TgTheme.ChatBg,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogPane(app: AhccAppState, modifier: Modifier = Modifier) {
+    val lines = app.logLines
+    val listState = rememberLazyListState()
+    LaunchedEffect(lines.size) {
+        if (lines.isEmpty()) return@LaunchedEffect
+        listState.scrollToItem(lines.lastIndex)
+    }
+    LayoutColumn(modifier = modifier.background(TgTheme.ChatBg)) {
+        LayoutRow(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(TgTheme.Panel)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        ) {
+            Text(
+                "Live log",
+                style = MaterialTheme.typography.titleSmall,
+                color = TgTheme.Text,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                "${lines.size} events",
+                style = MaterialTheme.typography.labelSmall,
+                color = TgTheme.Secondary,
+            )
+        }
+        if (lines.isEmpty()) {
+            LayoutBox(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "Inbound and outbound chat events appear here (newest at the bottom).\n" +
+                        "Each agent has its own chat window — click a name on the left to open it.",
+                    color = TgTheme.Secondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(lines.size) { index ->
+                    val entry = lines[index]
+                    val firstLine = entry.lineSequence().firstOrNull().orEmpty()
+                    val direction = firstLine.split(' ').getOrNull(1).orEmpty().ifBlank { "SYS" }
+                    val tint = when (direction) {
+                        "OUT" -> TgTheme.Accent
+                        "IN" -> TgTheme.Ok
+                        else -> TgTheme.Warn
+                    }
+                    LayoutColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(TgTheme.Panel)
+                            .padding(8.dp),
+                    ) {
+                        Text(
+                            direction,
+                            color = tint,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                        Text(
+                            entry,
+                            color = TgTheme.Text,
+                            style = MaterialTheme.typography.bodySmall,
                         )
                     }
                 }
             }
+        }
+    }
+}
 
-            LayoutColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(TgTheme.Panel)
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-            ) {
-                pendingAttach?.let { file ->
-                    LayoutRow(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(TgTheme.InputField)
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                    ) {
-                        Text(
-                            "📎 ${file.name}",
-                            color = TgTheme.Text,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(
-                            "Enter / Send →",
-                            color = TgTheme.Secondary,
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                        IconButton(onClick = { pendingAttach = null }) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = "Remove attachment",
-                                tint = TgTheme.Secondary,
-                            )
-                        }
-                    }
-                    LayoutSpacer(modifier = Modifier.height(6.dp))
+// ------------------------------------------------------------- chat windows
+
+@Composable
+private fun ApplicationScope.ChatWindow(app: AhccAppState, addressee: Addressee) {
+    val windowState = remember(addressee.id) { app.windowStateFor(addressee.id) }
+    Window(
+        onCloseRequest = { app.closeWindow(addressee.id) },
+        title = "AHCC · ${addressee.displayName}",
+        state = windowState,
+        undecorated = true,
+    ) {
+        DisposableEffect(addressee.id) {
+            val listener = object : WindowFocusListener {
+                override fun windowGainedFocus(e: WindowEvent?) {
+                    app.setWindowFocused(addressee.id, true)
                 }
-                LayoutRow(
-                    verticalAlignment = Alignment.Bottom,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth(),
+
+                override fun windowLostFocus(e: WindowEvent?) {
+                    app.setWindowFocused(addressee.id, false)
+                }
+            }
+            window.addWindowFocusListener(listener)
+            onDispose {
+                window.removeWindowFocusListener(listener)
+                if (app.focusedAddresseeId == addressee.id) {
+                    app.setWindowFocused(addressee.id, false)
+                }
+            }
+        }
+        val focusTick = app.windowFocusTick[addressee.id]
+        LaunchedEffect(focusTick) {
+            if (focusTick == null) return@LaunchedEffect
+            windowState.isMinimized = false
+            window.toFront()
+            window.requestFocus()
+        }
+        MaterialTheme(colorScheme = TgTheme.colorScheme()) {
+            LayoutColumn(modifier = Modifier.fillMaxSize().background(TgTheme.ChatBg)) {
+                AhccTitleBar(
+                    title = "${addressee.displayName} · @" +
+                        app.effectiveBot(addressee).ifBlank { "bot" },
+                    windowState = windowState,
+                    onClose = { app.closeWindow(addressee.id) },
+                    background = agentTint(addressee.id) ?: TgTheme.TitleBar,
+                )
+                ChatPane(app, addressee)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatPane(app: AhccAppState, addressee: Addressee) {
+    val connection by app.client.connectionState.collectAsState()
+    val messages = app.histories[addressee.id].orEmpty()
+    val draft = app.drafts[addressee.id] ?: TextFieldValue("")
+    val pendingFile = app.pendingAttach[addressee.id]
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(
+        messages.size,
+        messages.lastOrNull()?.content?.length,
+        messages.lastOrNull()?.inlineKeyboard?.rows?.size,
+        messages.lastOrNull()?.isStreaming,
+        messages.lastOrNull()?.isComplete,
+    ) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val last = messages.lastIndex
+        // animateScrollToItem alone stops at the *start* of a tall bubble — jump to end.
+        listState.scrollToItem(last, scrollOffset = Int.MAX_VALUE / 4)
+        listState.animateScrollToItem(last, scrollOffset = Int.MAX_VALUE / 4)
+    }
+
+    LayoutColumn(modifier = Modifier.fillMaxSize().background(TgTheme.ChatBg)) {
+        LayoutRow(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(TgTheme.Panel)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        ) {
+            Text(
+                "${addressee.displayName} · ${connectionLabel(connection)}",
+                color = TgTheme.Secondary,
+                style = MaterialTheme.typography.labelSmall,
+            )
+            when {
+                app.waitingReply && app.awaitingAddresseeId == addressee.id -> Text(
+                    "Hermes is typing…",
+                    color = TgTheme.Warn,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                app.waitingReply -> Text(
+                    "Waiting on other agent…",
+                    color = TgTheme.Warn,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+                app.lastReplyComplete && app.lastReplyAddresseeId == addressee.id -> Text(
+                    "Reply received ✓",
+                    color = TgTheme.Ok,
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
+            LayoutSpacer(modifier = Modifier.weight(1f))
+            if (app.lastFailedOutbound?.first == addressee.id && !app.waitingReply) {
+                TextButton(
+                    onClick = { app.resendLastFailed(addressee) },
+                    enabled = connection == ConnectionState.Connected,
                 ) {
-                    IconButton(
-                        onClick = { pickAttachment() },
-                        enabled = connection == ConnectionState.Connected,
-                    ) {
+                    Text("Resend", color = TgTheme.Warn)
+                }
+            }
+            TextButton(onClick = { app.clearChat(addressee) }) {
+                Text("Clear", color = TgTheme.Text)
+            }
+            TextButton(
+                onClick = { app.startNewSession(addressee) },
+                enabled = !app.waitingReply,
+            ) {
+                Text("New session", color = TgTheme.Text)
+            }
+        }
+
+        if (messages.isEmpty()) {
+            LayoutBox(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    when (app.config.channel) {
+                        ChatChannel.Telegram ->
+                            "${addressee.displayName} keeps its own chat window.\n" +
+                                "Messages arriving while this window is not focused raise a popup.\n" +
+                                "Enter — send · Shift+Enter — newline · Paperclip — attach."
+                        ChatChannel.HttpSse ->
+                            "HTTP SSE (Inference) — no server-side tools/routing.\n" +
+                                "Enter — send · Shift+Enter — newline · Paperclip — attach."
+                    },
+                    color = TgTheme.Secondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(messages, key = { it.id }) { msg ->
+                    MessageBubble(
+                        message = msg,
+                        onInlineButton = { action -> app.onInlineButton(addressee.id, msg.id, action) },
+                    )
+                }
+            }
+        }
+
+        LayoutColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(TgTheme.Panel)
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        ) {
+            pendingFile?.let { file ->
+                LayoutRow(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(TgTheme.InputField)
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        "📎 ${file.name}",
+                        color = TgTheme.Text,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        "Enter / Send →",
+                        color = TgTheme.Secondary,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                    IconButton(onClick = { app.pendingAttach.remove(addressee.id) }) {
                         Icon(
-                            Icons.Default.AttachFile,
-                            contentDescription = "Attach file",
+                            Icons.Default.Close,
+                            contentDescription = "Remove attachment",
                             tint = TgTheme.Secondary,
                         )
                     }
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        modifier = Modifier
-                            .weight(1f)
-                            .onPreviewKeyEvent { event ->
-                                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                                if (event.key != Key.Enter && event.key != Key.NumPadEnter) {
-                                    return@onPreviewKeyEvent false
-                                }
-                                // Desktop TextField often drops Shift+Enter; insert at caret.
-                                if (event.isShiftPressed) {
-                                    val text = draft.text
-                                    val start = draft.selection.min
-                                    val end = draft.selection.max
-                                    val inserted = text.replaceRange(start, end, "\n")
-                                    val caret = start + 1
-                                    draft = TextFieldValue(
-                                        text = inserted,
-                                        selection = TextRange(caret),
-                                    )
-                                    true
-                                } else {
-                                    send()
-                                    true
-                                }
-                            },
-                        enabled = connection == ConnectionState.Connected,
-                        singleLine = false,
-                        placeholder = {
-                            Text(
-                                when {
-                                    pendingAttach != null -> "Caption for file (Enter / Shift+Enter)…"
-                                    currentAddressee.id == Addressee.MAIN_AGENT_ID ->
-                                        "Message MainAgent… (Shift+Enter = newline)"
-                                    else ->
-                                        "Message ${currentAddressee.displayName}… (Shift+Enter = newline)"
-                                },
-                                color = TgTheme.Secondary,
-                            )
-                        },
-                        maxLines = 8,
-                        shape = RoundedCornerShape(20.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = TgTheme.Text,
-                            unfocusedTextColor = TgTheme.Text,
-                            focusedBorderColor = TgTheme.AccentSoft,
-                            unfocusedBorderColor = TgTheme.Border,
-                            focusedContainerColor = TgTheme.InputField,
-                            unfocusedContainerColor = TgTheme.InputField,
-                            cursorColor = TgTheme.Accent,
-                        ),
-                    )
-                    FilledIconButton(
-                        onClick = { send() },
-                        enabled = connection == ConnectionState.Connected &&
-                            (draft.text.isNotBlank() || pendingAttach != null),
-                    ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
-                    }
                 }
+                LayoutSpacer(modifier = Modifier.height(6.dp))
+            }
+            LayoutRow(
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                IconButton(
+                    onClick = { app.pickAttachment(addressee) },
+                    enabled = connection == ConnectionState.Connected,
+                ) {
+                    Icon(
+                        Icons.Default.AttachFile,
+                        contentDescription = "Attach file",
+                        tint = TgTheme.Secondary,
+                    )
+                }
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { app.drafts[addressee.id] = it },
+                    modifier = Modifier
+                        .weight(1f)
+                        .onPreviewKeyEvent { event ->
+                            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            if (event.key != Key.Enter && event.key != Key.NumPadEnter) {
+                                return@onPreviewKeyEvent false
+                            }
+                            // Desktop TextField often drops Shift+Enter; insert at caret.
+                            if (event.isShiftPressed) {
+                                val text = draft.text
+                                val start = draft.selection.min
+                                val end = draft.selection.max
+                                val inserted = text.replaceRange(start, end, "\n")
+                                val caret = start + 1
+                                app.drafts[addressee.id] = TextFieldValue(
+                                    text = inserted,
+                                    selection = TextRange(caret),
+                                )
+                                true
+                            } else {
+                                if (!app.waitingReply) app.send(addressee)
+                                true
+                            }
+                        },
+                    enabled = connection == ConnectionState.Connected,
+                    singleLine = false,
+                    placeholder = {
+                        Text(
+                            when {
+                                pendingFile != null -> "Caption for file (Enter / Shift+Enter)…"
+                                app.waitingReply -> "Waiting on other agent…"
+                                else -> "Message ${addressee.displayName}… (Shift+Enter = newline)"
+                            },
+                            color = TgTheme.Secondary,
+                        )
+                    },
+                    maxLines = 8,
+                    shape = RoundedCornerShape(20.dp),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = TgTheme.Text,
+                        unfocusedTextColor = TgTheme.Text,
+                        focusedBorderColor = TgTheme.AccentSoft,
+                        unfocusedBorderColor = TgTheme.Border,
+                        focusedContainerColor = TgTheme.InputField,
+                        unfocusedContainerColor = TgTheme.InputField,
+                        cursorColor = TgTheme.Accent,
+                    ),
+                )
+                FilledIconButton(
+                    onClick = { app.send(addressee) },
+                    enabled = connection == ConnectionState.Connected &&
+                        !app.waitingReply &&
+                        (draft.text.isNotBlank() || pendingFile != null),
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                }
+            }
+        }
+    }
+}
+
+// -------------------------------------------------------------- notifications
+
+@Composable
+private fun ApplicationScope.NotificationWindow(
+    app: AhccAppState,
+    notification: AhccNotification,
+    index: Int,
+) {
+    val screen = Toolkit.getDefaultToolkit().screenSize
+    val widthPx = 360
+    val heightPx = 96
+    val margin = 18
+    val x = (screen.width - widthPx - margin).coerceAtLeast(0)
+    val y = (screen.height - heightPx - margin - index * (heightPx + 10)).coerceAtLeast(0)
+    val state = remember(notification.id) {
+        WindowState(
+            position = WindowPosition(x.dp, y.dp),
+            size = DpSize(widthPx.dp, heightPx.dp),
+        )
+    }
+    Window(
+        onCloseRequest = { app.dismissNotification(notification.id) },
+        title = "${notification.title} — new message",
+        state = state,
+        undecorated = true,
+        alwaysOnTop = true,
+        resizable = false,
+        focusable = false,
+    ) {
+        MaterialTheme(colorScheme = TgTheme.colorScheme()) {
+            LayoutColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(TgTheme.Panel)
+                    .clickable {
+                        app.dismissNotification(notification.id)
+                        app.openWindow(notification.addresseeId)
+                    }
+                    .padding(12.dp),
+            ) {
+                Text(
+                    notification.title,
+                    color = TgTheme.Accent,
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                LayoutSpacer(modifier = Modifier.height(4.dp))
+                Text(
+                    notification.body.ifBlank { "(new message)" },
+                    color = TgTheme.Text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                LayoutSpacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Click to open chat",
+                    color = TgTheme.Secondary,
+                    style = MaterialTheme.typography.labelSmall,
+                )
             }
         }
     }

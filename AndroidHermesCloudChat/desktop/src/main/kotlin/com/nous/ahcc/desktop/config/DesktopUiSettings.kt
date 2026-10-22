@@ -90,6 +90,13 @@ object DesktopUiSettings {
             save(props)
         }
 
+    /**
+     * True when the properties file really carries an addressee catalog.
+     * Guards against overwriting a good file after a blank/partial read.
+     */
+    val hasAddresseeCatalog: Boolean
+        get() = !load().getProperty("addresseeCatalog").isNullOrBlank()
+
     var defaultAddresseeId: String
         get() = load().getProperty("defaultAddresseeId", Addressee.MAIN_AGENT_ID).orEmpty()
             .ifBlank { Addressee.MAIN_AGENT_ID }

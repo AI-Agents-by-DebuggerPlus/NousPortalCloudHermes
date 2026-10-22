@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.WindowPlacement
@@ -30,13 +31,14 @@ fun WindowScope.AhccTitleBar(
     title: String,
     windowState: WindowState,
     onClose: () -> Unit,
+    background: Color = TgTheme.TitleBar,
 ) {
     WindowDraggableArea {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(36.dp)
-                .background(TgTheme.TitleBar)
+                .background(background)
                 .padding(start = 12.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,

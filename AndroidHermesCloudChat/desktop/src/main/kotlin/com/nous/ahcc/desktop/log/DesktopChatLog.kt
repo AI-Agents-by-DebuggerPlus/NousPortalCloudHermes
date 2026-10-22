@@ -14,6 +14,15 @@ import kotlin.concurrent.withLock
  */
 object DesktopChatLog {
     private val lock = ReentrantLock()
+
+    /**
+     * Optional live sink: receives the same header + body text that is written to
+     * disk (header line, newline, message body). Used by the main window log pane.
+     * Invoked on the writing thread; subscribers must dispatch to their own thread.
+     */
+    @Volatile
+    var sink: ((String) -> Unit)? = null
+
     private val dayFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneId.systemDefault())
     private val tsFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX").withZone(ZoneId.systemDefault())
     private val utcTsFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
@@ -84,6 +93,23 @@ object DesktopChatLog {
     fun system(sessionId: String, text: String) =
         append("SYS", "system", sessionId, "-", text, "")
 
+    /** Per-agent log file — every line routed to that agent, window open or not. */
+    private fun agentLogFile(addresseeId: String): File =
+        File(logDir, "agent-${safeId(addresseeId)}.log")
+
+    private fun safeId(addresseeId: String): String = addresseeId
+        .map { c -> if (c.isLetterOrDigit() || c == '_' || c == '-') c else '_' }
+        .joinToString("")
+        .ifBlank { "unknown" }
+
+    /** Wipes one agent's own log (used by the window's Clear button). */
+    fun clearAgent(addresseeId: String) {
+        if (addresseeId.isBlank() || addresseeId == "-") return
+        lock.withLock {
+            runCatching { agentLogFile(addresseeId).delete() }
+        }
+    }
+
     private fun append(
         direction: String,
         role: String,
@@ -142,10 +168,16 @@ object DesktopChatLog {
             runCatching {
                 logDir.mkdirs()
                 file.appendText(block, Charsets.UTF_8)
+                // Also keep a per-agent file so each agent's traffic is readable on its own,
+                // regardless of whether that agent's chat window is open.
+                if (fileNamePrefix == "chat" && addresseeId.isNotBlank() && addresseeId != "-") {
+                    agentLogFile(addresseeId).appendText(block, Charsets.UTF_8)
+                }
             }.onFailure { e ->
                 System.err.println("[AHCC-LOG] write failed path=${file.absolutePath}: ${e.message}")
             }
         }
+        sink?.let { s -> runCatching { s(header + "\n" + body.trimEnd()) } }
     }
 
     /** Prefer `<repo>/Logs`; walk up from cwd looking for repo marker or existing Logs. */
